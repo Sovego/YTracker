@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -10,6 +10,20 @@ export interface Issue {
     description: string;
     status: { key: string; display: string };
     priority: { key: string; display: string };
+}
+
+type IssuePageResponse = {
+    issues: Issue[];
+    next_scroll_id?: string | null;
+    total_count?: number | null;
+    has_more: boolean;
+};
+
+export interface IssuePage {
+    issues: Issue[];
+    nextScrollId: string | null;
+    totalCount: number | null;
+    hasMore: boolean;
 }
 
 export interface TimerState {
@@ -147,6 +161,67 @@ const detailCache = {
     transitions: new Map<string, CacheEntry<Transition[]>>()
 };
 
+const DEFAULT_ISSUE_QUERY_KEY = "__default__";
+const SCROLL_ROOT_KEY = "__scroll_root__";
+const issueFetchPromises = new Map<string, Promise<IssuePage>>();
+
+const getIssueFetchKey = (query?: string, scrollId?: string | null) => {
+    const normalizedQuery = query?.trim() || DEFAULT_ISSUE_QUERY_KEY;
+    const normalizedScroll = scrollId?.trim() || SCROLL_ROOT_KEY;
+    return `${normalizedQuery}::${normalizedScroll}`;
+};
+
+const normalizeIssuePage = (payload: IssuePageResponse): IssuePage => ({
+    issues: payload.issues ?? [],
+    nextScrollId: payload.next_scroll_id ?? null,
+    totalCount: payload.total_count ?? null,
+    hasMore: payload.has_more ?? false,
+});
+
+const requestIssuePage = async (query?: string, scrollId?: string | null) => {
+    const key = getIssueFetchKey(query, scrollId);
+    let existing = issueFetchPromises.get(key);
+    if (!existing) {
+        const promise = invoke<IssuePageResponse>("get_issues", {
+            query: query ?? null,
+            scroll_id: scrollId ?? null,
+        })
+            .then(normalizeIssuePage)
+            .finally(() => {
+                if (issueFetchPromises.get(key) === promise) {
+                    issueFetchPromises.delete(key);
+                }
+            });
+        issueFetchPromises.set(key, promise);
+        existing = promise;
+    }
+    return existing;
+};
+
+const mergeIssueLists = (current: Issue[], incoming: Issue[]): Issue[] => {
+    if (incoming.length === 0) {
+        return current;
+    }
+
+    const indexMap = new Map<string, number>();
+    current.forEach((issue, index) => {
+        indexMap.set(issue.key, index);
+    });
+
+    const next = current.slice();
+    incoming.forEach((issue) => {
+        const existingIndex = indexMap.get(issue.key);
+        if (existingIndex !== undefined) {
+            next[existingIndex] = issue;
+        } else {
+            indexMap.set(issue.key, next.length);
+            next.push(issue);
+        }
+    });
+
+    return next;
+};
+
 let cachedStatuses: SimpleEntity[] | null = null;
 let statusesPromise: Promise<SimpleEntity[]> | null = null;
 let cachedResolutions: SimpleEntity[] | null = null;
@@ -251,8 +326,8 @@ export function useIssueDetails() {
         );
     };
 
-    const executeTransition = async (issueKey: string, transitionId: string) => {
-        const result = await invoke("execute_transition", { issueKey, transitionId });
+    const executeTransition = async (issueKey: string, transitionId: string, comment?: string, resolution?: string) => {
+        const result = await invoke("execute_transition", { issueKey, transitionId, comment, resolution });
         invalidateCache(issueKey, "transitions");
         return result;
     };
@@ -318,24 +393,84 @@ export function useIssueDetails() {
 export function useTracker() {
     const [issues, setIssues] = useState<Issue[]>([]);
     const [loading, setLoading] = useState(false);
+    const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [hasMore, setHasMore] = useState(false);
 
-    const fetchIssues = async (query?: string): Promise<boolean> => {
+    const currentQueryRef = useRef<string | undefined>(undefined);
+    const nextScrollIdRef = useRef<string | null>(null);
+
+    const releaseScrollSnapshot = useCallback((targetId?: string | null) => {
+        const scrollId = targetId ?? nextScrollIdRef.current;
+        if (!scrollId) {
+            return;
+        }
+        nextScrollIdRef.current = null;
+        void invoke("release_scroll_context", { scroll_id: scrollId }).catch((err) => {
+            console.warn("Failed to release scroll context", err);
+        });
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            releaseScrollSnapshot();
+        };
+    }, [releaseScrollSnapshot]);
+
+    const fetchIssues = useCallback(async (query?: string): Promise<boolean> => {
         setLoading(true);
         setError(null);
+
+        const normalizedQuery = query?.trim() || undefined;
+        currentQueryRef.current = normalizedQuery;
+
+        if (nextScrollIdRef.current) {
+            releaseScrollSnapshot();
+        }
+
         try {
-            const data = await invoke<Issue[]>("get_issues", { query });
-            setIssues(data);
+            const page = await requestIssuePage(normalizedQuery, null);
+            nextScrollIdRef.current = page.nextScrollId;
+            setIssues(page.issues);
+            setHasMore(page.hasMore);
             return true;
         } catch (err) {
+            setIssues([]);
+            setHasMore(false);
             setError(String(err));
             return false;
         } finally {
             setLoading(false);
         }
-    };
+    }, [releaseScrollSnapshot]);
 
-    return { issues, loading, error, fetchIssues };
+    const loadMore = useCallback(async (): Promise<boolean> => {
+        if (loading || loadingMore) {
+            return false;
+        }
+        const scrollId = nextScrollIdRef.current;
+        if (!scrollId) {
+            return false;
+        }
+
+        setLoadingMore(true);
+        setError(null);
+
+        try {
+            const page = await requestIssuePage(currentQueryRef.current, scrollId);
+            nextScrollIdRef.current = page.nextScrollId;
+            setHasMore(page.hasMore);
+            setIssues((prev) => mergeIssueLists(prev, page.issues));
+            return page.issues.length > 0;
+        } catch (err) {
+            setError(String(err));
+            return false;
+        } finally {
+            setLoadingMore(false);
+        }
+    }, [loading, loadingMore]);
+
+    return { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore };
 }
 
 export function useTimer() {

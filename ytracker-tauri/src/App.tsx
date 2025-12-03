@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from "react";
+import { useState, useEffect, useRef, useCallback, type FormEvent } from "react";
 import { useTracker, Issue, useTimer, checkSessionExists } from "./hooks/useBridge";
 import { IssueList } from "./components/IssueList";
 import { IssueDetail } from "./components/IssueDetail";
@@ -13,7 +13,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 
 function App() {
-  const { issues, loading, error, fetchIssues } = useTracker();
+  const { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore } = useTracker();
   const { state: timerState, start: invokeStartTimer, stop: invokeStopTimer } = useTimer();
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -23,6 +23,7 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [pendingRestart, setPendingRestart] = useState<{ key: string; summary: string } | null>(null);
   const [detailKey, setDetailKey] = useState<string>("empty");
+  const listContainerRef = useRef<HTMLDivElement | null>(null);
   const isNarrowLayout = useMediaQuery("(max-width: 1023px)");
   const showDetailPlaceholder = loading && issues.length === 0;
 
@@ -94,6 +95,25 @@ function App() {
   useEffect(() => {
     setDetailKey(selectedIssue?.key ?? "empty");
   }, [selectedIssue]);
+
+  const maybeTriggerLoadMore = useCallback(() => {
+    if (!hasMore || loading || loadingMore) return;
+    const container = listContainerRef.current;
+    if (!container) return;
+    const distanceToBottom = container.scrollHeight - (container.scrollTop + container.clientHeight);
+    const threshold = Math.max(container.clientHeight * 0.2, 120);
+    if (distanceToBottom <= threshold) {
+      void loadMore();
+    }
+  }, [hasMore, loading, loadingMore, loadMore]);
+
+  const handleListScroll = useCallback(() => {
+    maybeTriggerLoadMore();
+  }, [maybeTriggerLoadMore]);
+
+  useEffect(() => {
+    maybeTriggerLoadMore();
+  }, [issues, maybeTriggerLoadMore]);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,7 +306,11 @@ function App() {
               )}
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-4 relative">
+            <div
+              className="flex-1 overflow-y-auto px-4 py-4 relative"
+              ref={listContainerRef}
+              onScroll={handleListScroll}
+            >
               {loading && issues.length > 0 && <RefreshOverlay />}
               {loading && issues.length === 0 ? (
                 <IssueListSkeleton />
@@ -295,11 +319,31 @@ function App() {
                   No issues found.
                 </div>
               ) : (
-                <IssueList
-                  issues={issues}
-                  selectedKey={selectedIssue?.key ?? null}
-                  onSelect={setSelectedIssue}
-                />
+                <>
+                  <IssueList
+                    issues={issues}
+                    selectedKey={selectedIssue?.key ?? null}
+                    onSelect={setSelectedIssue}
+                  />
+                  <div className="py-4 flex justify-center">
+                    {loadingMore ? (
+                      <div className="inline-flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+                        <RefreshCw className="w-4 h-4 animate-spin text-blue-500" />
+                        Loading more issues…
+                      </div>
+                    ) : hasMore ? (
+                      <button
+                        type="button"
+                        onClick={() => void loadMore()}
+                        className="text-xs font-semibold text-blue-600 hover:text-blue-500"
+                      >
+                        Load more issues
+                      </button>
+                    ) : (
+                      <p className="text-xs text-slate-400">You&apos;re all caught up.</p>
+                    )}
+                  </div>
+                </>
               )}
             </div>
 

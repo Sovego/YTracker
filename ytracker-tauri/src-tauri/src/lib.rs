@@ -31,8 +31,9 @@ use ytracker_api::models::CommentAuthor as NativeCommentAuthor;
 use ytracker_api::rate_limiter::RateLimiter;
 use ytracker_api::{
     auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment, Issue as NativeIssue,
-    IssueFieldRef as NativeIssueFieldRef, OrgType, SimpleEntityRaw as NativeSimpleEntity,
-    TrackerClient, TrackerConfig, Transition as NativeTransition, UserProfile as NativeUserProfile,
+    IssueFieldRef as NativeIssueFieldRef, OrgType, ScrollType,
+    SimpleEntityRaw as NativeSimpleEntity, TrackerClient, TrackerConfig,
+    Transition as NativeTransition, UserProfile as NativeUserProfile,
 };
 
 static DURATION_TOKEN_REGEX: Lazy<Regex> =
@@ -49,6 +50,8 @@ const MENU_START_SUBMENU_ID: &str = "tray_start_submenu";
 const ISSUE_MENU_PREFIX: &str = "tray_issue::";
 const MAX_TRAY_ISSUES: usize = 12;
 const ISSUE_REFRESH_INTERVAL_SECS: u64 = 300;
+const ISSUE_SCROLL_PER_PAGE: u32 = 100;
+const ISSUE_SCROLL_TTL_MILLIS: u64 = 60_000;
 
 #[derive(Debug, Serialize)]
 struct UpdateAvailablePayload {
@@ -56,6 +59,14 @@ struct UpdateAvailablePayload {
     notes: Option<String>,
     pub_date: Option<String>,
     automatic: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct IssuePagePayload {
+    issues: Vec<bridge::Issue>,
+    next_scroll_id: Option<String>,
+    total_count: Option<u64>,
+    has_more: bool,
 }
 
 fn format_elapsed(elapsed: u64) -> String {
@@ -418,6 +429,36 @@ async fn fetch_issues_native(
     Ok(convert_issues_native(response))
 }
 
+async fn fetch_issue_page_native(
+    app: &tauri::AppHandle,
+    query: &str,
+    scroll_id: Option<&str>,
+) -> Result<IssuePagePayload, String> {
+    let secrets = secrets_from_app(app)?;
+    let client = build_tracker_client(&secrets)?;
+    let response = client
+        .search_issues_scroll(
+            query,
+            scroll_id,
+            Some(ISSUE_SCROLL_PER_PAGE),
+            ScrollType::Sorted,
+            Some(ISSUE_SCROLL_TTL_MILLIS),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let issues = convert_issues_native(response.items);
+    let next_scroll_id = response.scroll_id;
+    let has_more = next_scroll_id.is_some();
+
+    Ok(IssuePagePayload {
+        issues,
+        next_scroll_id,
+        total_count: response.total_count,
+        has_more,
+    })
+}
+
 async fn fetch_comments_native(
     secrets: SecretsManager,
     issue_key: &str,
@@ -473,6 +514,21 @@ async fn fetch_resolutions_native(
     Ok(convert_simple_entities_native(resolutions))
 }
 
+async fn release_scroll_context_native(
+    app: &tauri::AppHandle,
+    scroll_id: &str,
+) -> Result<(), String> {
+    if scroll_id.trim().is_empty() {
+        return Ok(());
+    }
+    let secrets = secrets_from_app(app)?;
+    let client = build_tracker_client(&secrets)?;
+    client
+        .clear_scroll_context(scroll_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
 fn convert_comments_native(comments: Vec<NativeComment>) -> Vec<bridge::Comment> {
     comments
         .into_iter()
@@ -512,9 +568,7 @@ async fn find_attachment_metadata(
         .map_err(|err| err.to_string())?;
     attachments
         .into_iter()
-        .find(|attachment| {
-            coerce_display_value(&attachment.id).as_deref() == Some(attachment_id)
-        })
+        .find(|attachment| coerce_display_value(&attachment.id).as_deref() == Some(attachment_id))
         .ok_or_else(|| {
             format!(
                 "Attachment {} not found on issue {}",
@@ -678,10 +732,12 @@ async fn execute_transition_native(
     secrets: SecretsManager,
     issue_key: &str,
     transition_id: &str,
+    comment: Option<&str>,
+    resolution: Option<&str>,
 ) -> Result<(), String> {
     let client = build_tracker_client(&secrets)?;
     client
-        .execute_transition(issue_key, transition_id, None, None)
+        .execute_transition(issue_key, transition_id, comment, resolution)
         .await
         .map_err(|err| err.to_string())
 }
@@ -962,14 +1018,23 @@ async fn get_issues(
     issue_store: tauri::State<'_, IssueStore>,
     timer: tauri::State<'_, Arc<Timer>>,
     query: Option<String>,
-) -> Result<Vec<bridge::Issue>, String> {
-    refresh_issue_cache(
-        app,
-        issue_store.inner().clone(),
-        timer.inner().clone(),
-        query,
-    )
-    .await
+    scroll_id: Option<String>,
+) -> Result<IssuePagePayload, String> {
+    let q = query
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_ISSUE_QUERY.to_string());
+
+    let page = fetch_issue_page_native(&app, &q, scroll_id.as_deref()).await?;
+
+    if scroll_id.is_none() {
+        issue_store.set(page.issues.clone());
+        let state = timer.get_state();
+        if let Err(err) = update_tray_menu(&app, &page.issues, &state) {
+            eprintln!("Failed to update tray state: {}", err);
+        }
+    }
+
+    Ok(page)
 }
 
 #[tauri::command]
@@ -1043,6 +1108,14 @@ async fn get_resolutions(
 }
 
 #[tauri::command]
+async fn release_scroll_context(app: tauri::AppHandle, scroll_id: String) -> Result<(), String> {
+    if scroll_id.trim().is_empty() {
+        return Ok(());
+    }
+    release_scroll_context_native(&app, &scroll_id).await
+}
+
+#[tauri::command]
 async fn download_attachment(
     issue_key: String,
     attachment_id: String,
@@ -1085,10 +1158,19 @@ async fn get_transitions(
 async fn execute_transition(
     issue_key: String,
     transition_id: String,
+    comment: Option<String>,
+    resolution: Option<String>,
     secrets: tauri::State<'_, SecretsManager>,
 ) -> Result<(), String> {
     let secrets_clone = secrets.inner().clone();
-    execute_transition_native(secrets_clone, &issue_key, &transition_id).await
+    execute_transition_native(
+        secrets_clone,
+        &issue_key,
+        &transition_id,
+        comment.as_deref(),
+        resolution.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1320,6 +1402,7 @@ pub fn run() {
             get_attachments,
             get_statuses,
             get_resolutions,
+            release_scroll_context,
             download_attachment,
             preview_attachment,
             preview_inline_image,

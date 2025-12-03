@@ -210,6 +210,50 @@ impl TrackerClient {
         Self::parse_json(response).await
     }
 
+    pub async fn search_issues_scroll(
+        &self,
+        query: &str,
+        scroll_id: Option<&str>,
+        per_scroll: Option<u32>,
+        scroll_type: ScrollType,
+        scroll_ttl_millis: Option<u64>,
+    ) -> Result<ScrollPage<TrackerIssue>> {
+        self.limiter.hit().await;
+        let url = format!("{}issues/_search", self.config.api_root());
+        let mut params = vec![("fields", ISSUE_SUMMARY_FIELDS.to_string())];
+
+        if let Some(id) = scroll_id {
+            params.push(("scrollId", id.to_string()));
+        } else {
+            let per_scroll = per_scroll.unwrap_or(100).clamp(1, 1000);
+            params.push(("scrollType", scroll_type.as_str().to_string()));
+            params.push(("perScroll", per_scroll.to_string()));
+        }
+
+        if let Some(ttl) = scroll_ttl_millis {
+            params.push(("scrollTTLMillis", ttl.to_string()));
+        }
+
+        let payload = IssueSearchRequest::new(query);
+        let response = self
+            .http
+            .post(url)
+            .query(&params)
+            .json(&payload)
+            .send()
+            .await?;
+
+        let (headers, issues): (HeaderMap, Vec<TrackerIssue>) =
+            parse_json_with_headers(response).await?;
+
+        Ok(ScrollPage {
+            items: issues,
+            scroll_id: header_string(&headers, "X-Scroll-Id"),
+            scroll_token: header_string(&headers, "X-Scroll-Token"),
+            total_count: header_string(&headers, "X-Total-Count").and_then(|value| value.parse().ok()),
+        })
+    }
+
     pub async fn get_issue_comments(&self, issue_key: &str) -> Result<Vec<TrackerComment>> {
         let path = format!("issues/{}/comments", issue_key);
         self.get(&path).await
@@ -281,6 +325,18 @@ impl TrackerClient {
         self.send_expect_empty(Method::POST, &path, Some(&payload)).await
     }
 
+    pub async fn clear_scroll_context(&self, scroll_id: &str) -> Result<()> {
+        #[derive(Serialize)]
+        struct ScrollClearRequest<'a> {
+            #[serde(rename = "scrollId")]
+            scroll_id: &'a str,
+        }
+
+        let payload = ScrollClearRequest { scroll_id };
+        self.send_expect_empty(Method::POST, "system/search/scroll/_clear", Some(&payload))
+            .await
+    }
+
     pub async fn fetch_binary(&self, href: &str) -> Result<BinaryContent> {
         self.limiter.hit().await;
         let url = self.absolute_url(href)?;
@@ -343,6 +399,57 @@ fn extract_error_code(body: &str) -> Option<String> {
     serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|value| value.get("code").and_then(|c| c.as_str()).map(|s| s.to_string()))
+}
+
+async fn parse_json_with_headers<T>(response: Response) -> Result<(HeaderMap, T)>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status();
+    let headers = response.headers().clone();
+    if status.is_success() {
+        let data = response.json::<T>().await.map_err(TrackerError::from)?;
+        Ok((headers, data))
+    } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let body = response.text().await.unwrap_or_default();
+        Err(TrackerError::Authentication(format!(
+            "Access denied ({}) - {}",
+            status, body
+        )))
+    } else {
+        let body = response.text().await.unwrap_or_default();
+        Err(build_http_error(status, &body))
+    }
+}
+
+fn header_string(headers: &HeaderMap, key: &str) -> Option<String> {
+    headers
+        .get(key)
+        .and_then(|value| value.to_str().ok())
+        .map(|text| text.to_string())
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ScrollType {
+    Sorted,
+    Unsorted,
+}
+
+impl ScrollType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ScrollType::Sorted => "sorted",
+            ScrollType::Unsorted => "unsorted",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ScrollPage<T> {
+    pub items: Vec<T>,
+    pub scroll_id: Option<String>,
+    pub scroll_token: Option<String>,
+    pub total_count: Option<u64>,
 }
 
 const ISSUE_SUMMARY_FIELDS: &str = "key,summary,description,status,priority";

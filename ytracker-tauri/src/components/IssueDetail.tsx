@@ -1,4 +1,4 @@
-import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition } from "../hooks/useBridge";
+import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity } from "../hooks/useBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Play, Square, Edit2, Save, X, Download, MessageSquare, Paperclip, ChevronDown, Send, Eye, Loader2 } from "lucide-react";
@@ -121,14 +121,22 @@ interface IssueDetailProps {
 }
 
 export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate }: IssueDetailProps) {
-    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, executeTransition } = useIssueDetails();
+    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, executeTransition, getResolutions } = useIssueDetails();
 
     const [comments, setComments] = useState<Comment[]>([]);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
     const [transitions, setTransitions] = useState<Transition[]>([]);
+    const [resolutions, setResolutions] = useState<SimpleEntity[]>([]);
     const [issueDetails, setIssueDetails] = useState<Issue | null>(null);
     const [newComment, setNewComment] = useState("");
     const [inlineImages, setInlineImages] = useState<Record<string, InlineImageEntry>>({});
+
+    const [transitionDialog, setTransitionDialog] = useState<{
+        isOpen: boolean;
+        transition: Transition | null;
+        comment: string;
+        resolution: string;
+    }>({ isOpen: false, transition: null, comment: "", resolution: "" });
 
     const [isEditing, setIsEditing] = useState(false);
     const [editSummary, setEditSummary] = useState("");
@@ -223,6 +231,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             closeStatusMenu();
             // Load details asynchronously without blocking render
             loadDetails(issue.key).catch(console.error);
+            getResolutions().then(setResolutions).catch(console.error);
         } else {
             setIssueDetails(null);
             setComments([]);
@@ -298,17 +307,35 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         }
     };
 
-    const handleTransition = async (transitionId: string) => {
-        if (!activeIssue) return;
+    const handleTransition = (transitionId: string) => {
+        const transition = transitions.find(t => t.id === transitionId);
+        if (!transition) return;
+
+        setTransitionDialog({
+            isOpen: true,
+            transition,
+            comment: "",
+            resolution: ""
+        });
+        closeStatusMenu();
+    };
+
+    const confirmTransition = async () => {
+        if (!activeIssue || !transitionDialog.transition) return;
+
         try {
-            await executeTransition(activeIssue.key, transitionId);
+            await executeTransition(
+                activeIssue.key,
+                transitionDialog.transition.id,
+                transitionDialog.comment || undefined,
+                transitionDialog.resolution || undefined
+            );
             onIssueUpdate();
-            loadDetails(activeIssue.key); // Refresh transitions
+            loadDetails(activeIssue.key);
+            setTransitionDialog(prev => ({ ...prev, isOpen: false }));
         } catch (e) {
             console.error("Failed to transition", e);
             alert("Failed to transition");
-        } finally {
-            closeStatusMenu();
         }
     };
 
@@ -737,9 +764,9 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                 </div>
             </div>
 
-            {(previewAttachmentData || previewLoadingId || previewError) && (
-                <div className="absolute inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4">
-                    <div className="w-full max-w-3xl bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl border border-white/70 dark:border-slate-800/70 overflow-hidden">
+            {(previewAttachmentData || previewLoadingId || previewError) && typeof document !== "undefined" && createPortal(
+                <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4 py-8">
+                    <div className="w-full max-w-3xl bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl border border-white/70 dark:border-slate-800/70 overflow-hidden transform translate-y-3 sm:translate-y-4 lg:translate-y-0 transition-transform">
                         <div className="flex items-center justify-between px-5 py-4 border-b border-white/70 dark:border-slate-800/70">
                             <div>
                                 <p className="text-xs uppercase tracking-[0.4em] text-slate-400">Attachment Preview</p>
@@ -770,8 +797,81 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                             ) : null}
                         </div>
                     </div>
-                </div>
+                </div>, document.body
             )}
+
+            {transitionDialog.isOpen && transitionDialog.transition && typeof document !== "undefined" && createPortal(
+                <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4 py-8">
+                    <div className="w-full max-w-lg bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl border border-white/70 dark:border-slate-800/70 overflow-hidden flex flex-col max-h-[90vh] transform translate-y-3 sm:translate-y-4 lg:translate-y-0 transition-transform">
+                        <div className="flex items-center justify-between px-5 py-4 border-b border-white/70 dark:border-slate-800/70">
+                            <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+                                {transitionDialog.transition.name}
+                            </h3>
+                            <button
+                                onClick={() => setTransitionDialog(prev => ({ ...prev, isOpen: false }))}
+                                className="h-8 w-8 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-center text-slate-500"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-4 overflow-y-auto">
+                            {(transitionDialog.transition.to_status?.key === "closed" || transitionDialog.transition.to_status?.key === "resolved") && (
+                                <div className="space-y-2">
+                                    <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                                        Resolution
+                                    </label>
+                                    <div className="relative">
+                                        <select
+                                            value={transitionDialog.resolution}
+                                            onChange={e => setTransitionDialog(prev => ({ ...prev, resolution: e.target.value }))}
+                                            className="w-full appearance-none rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        >
+                                            <option value="">Select resolution...</option>
+                                            {resolutions.map(res => (
+                                                <option key={res.key} value={res.key}>
+                                                    {res.display}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-slate-500">
+                                            <ChevronDown className="h-4 w-4" />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                                    Comment (optional)
+                                </label>
+                                <textarea
+                                    value={transitionDialog.comment}
+                                    onChange={e => setTransitionDialog(prev => ({ ...prev, comment: e.target.value }))}
+                                    placeholder="Add a comment..."
+                                    className="w-full h-32 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-3 px-5 py-4 border-t border-white/70 dark:border-slate-800/70 bg-slate-50/50 dark:bg-slate-900/50">
+                            <button
+                                onClick={() => setTransitionDialog(prev => ({ ...prev, isOpen: false }))}
+                                className="px-4 py-2 rounded-lg text-sm font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={confirmTransition}
+                                className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 shadow-sm"
+                            >
+                                Execute
+                            </button>
+                        </div>
+                    </div>
+                </div>, document.body
+            )}
+
             {statusMenuPortal}
         </div>
     );
