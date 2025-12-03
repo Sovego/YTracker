@@ -247,9 +247,6 @@ function App() {
                 Tracker
               </p>
               <h1 className="text-2xl font-semibold text-slate-900 dark:text-white">YTracker</h1>
-              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                Adwaita-inspired desktop board
-              </p>
             </div>
 
             <div className="px-6 py-4 border-b border-white/50 dark:border-slate-800/60 space-y-3">
@@ -307,10 +304,6 @@ function App() {
             </div>
 
             <div className="px-6 py-4 border-t border-white/60 dark:border-slate-800/70 text-xs text-slate-400">
-              <div className="flex items-center justify-between">
-                <span>YTracker v2.0</span>
-                <span className="text-slate-500">Tauri Edition</span>
-              </div>
             </div>
           </aside>
 

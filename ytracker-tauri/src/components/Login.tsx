@@ -23,26 +23,14 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
 
     const ensureCredentialsReady = () => {
         if (credentialsLoading) {
-            setStatusBanner({
-                variant: "error",
-                message: "OAuth credentials are still loading. Please wait a moment and try again.",
-            });
             return false;
         }
 
         if (!clientId) {
-            setStatusBanner({
-                variant: "error",
-                message: "OAuth client ID is not configured in this build. Please provide credentials via environment variables and rebuild.",
-            });
             return false;
         }
 
         if (!secretAvailable) {
-            setStatusBanner({
-                variant: "error",
-                message: "OAuth client secret is missing. Contact your administrator to configure credentials for this build.",
-            });
             return false;
         }
 
