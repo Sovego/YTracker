@@ -1,0 +1,1342 @@
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use chrono::Utc;
+use directories::UserDirs;
+use once_cell::sync::Lazy;
+use regex::Regex;
+use serde::Serialize;
+use serde_json::Value;
+use std::env;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager, Runtime};
+#[allow(unused_imports)]
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterExt};
+use tokio::{fs as async_fs, task, time::sleep};
+
+mod bridge;
+mod config;
+mod issue_store;
+mod secrets;
+mod timer;
+use config::{Config, ConfigManager};
+use issue_store::IssueStore;
+use secrets::{ClientCredentialsInfo, SecretsManager, SessionToken};
+use timer::Timer;
+use ytracker_api::models::CommentAuthor as NativeCommentAuthor;
+use ytracker_api::rate_limiter::RateLimiter;
+use ytracker_api::{
+    auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment, Issue as NativeIssue,
+    IssueFieldRef as NativeIssueFieldRef, OrgType, SimpleEntityRaw as NativeSimpleEntity,
+    TrackerClient, TrackerConfig, Transition as NativeTransition, UserProfile as NativeUserProfile,
+};
+
+static DURATION_TOKEN_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\d+)\s*(w|d|h|m)").expect("invalid duration regex"));
+const DEFAULT_ISSUE_QUERY: &str = "Assignee: me() Resolution: empty()";
+const TRAY_ID: &str = "tray";
+const MENU_STOP_ID: &str = "tray_stop_timer";
+const MENU_REFRESH_ID: &str = "tray_refresh";
+const MENU_RUNNING_LABEL_ID: &str = "tray_running_label";
+const MENU_IDLE_LABEL_ID: &str = "tray_idle_label";
+const MENU_NO_ISSUES_ID: &str = "tray_no_issues";
+const MENU_MORE_ISSUES_ID: &str = "tray_more_issues";
+const MENU_START_SUBMENU_ID: &str = "tray_start_submenu";
+const ISSUE_MENU_PREFIX: &str = "tray_issue::";
+const MAX_TRAY_ISSUES: usize = 12;
+const ISSUE_REFRESH_INTERVAL_SECS: u64 = 300;
+
+#[derive(Debug, Serialize)]
+struct UpdateAvailablePayload {
+    version: String,
+    notes: Option<String>,
+    pub_date: Option<String>,
+    automatic: bool,
+}
+
+fn format_elapsed(elapsed: u64) -> String {
+    let hours = elapsed / 3600;
+    let minutes = (elapsed % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {:02}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_text(value: &str, limit: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    if limit <= 1 {
+        return "…".to_string();
+    }
+    let mut truncated: String = trimmed.chars().take(limit - 1).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn format_issue_label(issue: &bridge::Issue) -> String {
+    let summary = collapse_whitespace(&issue.summary);
+    if summary.is_empty() {
+        issue.key.clone()
+    } else {
+        format!("{}: {}", issue.key, truncate_text(&summary, 60))
+    }
+}
+
+fn format_running_label(state: &timer::TimerState) -> String {
+    let key = state.issue_key.as_deref().unwrap_or("Timer");
+    let summary = state
+        .issue_summary
+        .as_deref()
+        .map(|s| truncate_text(&collapse_whitespace(s), 50))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Timer running".to_string());
+    format!(
+        "Running: {} — {} ({})",
+        key,
+        summary,
+        format_elapsed(state.elapsed)
+    )
+}
+
+fn issue_menu_id(issue_key: &str) -> String {
+    format!("{}{}", ISSUE_MENU_PREFIX, issue_key)
+}
+
+fn notify_timer_started(app: &tauri::AppHandle, issue_key: &str, summary: Option<&str>) {
+    let title = format!("Timer started: {}", issue_key);
+    let body = summary
+        .map(|s| truncate_text(&collapse_whitespace(s), 80))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Tracking time from tray".to_string());
+
+    if let Err(err) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("Failed to show start notification: {}", err);
+    }
+}
+
+fn notify_timer_stopped(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
+    let title = format!("Timer stopped: {}", issue_key);
+    let body = format!("Tracked {}", format_elapsed(elapsed));
+
+    if let Err(err) = app.notification().builder().title(title).body(body).show() {
+        eprintln!("Failed to show stop notification: {}", err);
+    }
+}
+
+fn broadcast_timer_state(app: &tauri::AppHandle, timer: &Arc<Timer>, issue_store: &IssueStore) {
+    let snapshot = timer.get_state();
+    if let Err(err) = app.emit("timer-tick", &snapshot) {
+        eprintln!("Failed to emit timer tick: {}", err);
+    }
+    if let Err(err) = update_tray_menu(app, &issue_store.snapshot(), &snapshot) {
+        eprintln!("Failed to update tray state: {}", err);
+    }
+}
+
+async fn refresh_issue_cache(
+    app: tauri::AppHandle,
+    issue_store: IssueStore,
+    timer: Arc<Timer>,
+    query: Option<String>,
+) -> Result<Vec<bridge::Issue>, String> {
+    println!("Refreshing issue cache...");
+    let q = query.unwrap_or_else(|| DEFAULT_ISSUE_QUERY.to_string());
+    let issues = match fetch_issues_native(&app, &q).await {
+        Ok(issues) => {
+            println!("Successfully fetched {} issues", issues.len());
+            issues
+        }
+        Err(e) => {
+            println!("Failed to fetch issues: {}", e);
+            return Err(e);
+        }
+    };
+    issue_store.set(issues.clone());
+    let state = timer.get_state();
+    if let Err(err) = update_tray_menu(&app, &issues, &state) {
+        eprintln!("Failed to update tray state: {}", err);
+    }
+    Ok(issues)
+}
+
+fn build_tray_menu<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    issues: &[bridge::Issue],
+    timer_state: &timer::TimerState,
+) -> tauri::Result<Menu<R>> {
+    let menu = Menu::new(app)?;
+
+    if timer_state.active {
+        let running_item = MenuItem::with_id(
+            app,
+            MENU_RUNNING_LABEL_ID,
+            format_running_label(timer_state),
+            false,
+            None::<&str>,
+        )?;
+        menu.append(&running_item)?;
+
+        let stop_item = MenuItem::with_id(app, MENU_STOP_ID, "Stop Timer", true, None::<&str>)?;
+        menu.append(&stop_item)?;
+    } else {
+        let idle_item =
+            MenuItem::with_id(app, MENU_IDLE_LABEL_ID, "Timer idle", false, None::<&str>)?;
+        menu.append(&idle_item)?;
+    }
+
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+
+    if issues.is_empty() {
+        let placeholder = MenuItem::with_id(
+            app,
+            MENU_NO_ISSUES_ID,
+            "No issues found",
+            false,
+            None::<&str>,
+        )?;
+        menu.append(&placeholder)?;
+    } else {
+        let start_submenu = Submenu::with_id(app, MENU_START_SUBMENU_ID, "Start Timer", true)?;
+
+        for issue in issues.iter().take(MAX_TRAY_ISSUES) {
+            let enabled = timer_state.issue_key.as_deref() != Some(&issue.key);
+            let entry = MenuItem::with_id(
+                app,
+                issue_menu_id(&issue.key),
+                format_issue_label(issue),
+                enabled,
+                None::<&str>,
+            )?;
+            start_submenu.append(&entry)?;
+        }
+
+        if issues.len() > MAX_TRAY_ISSUES {
+            let extra_count = issues.len() - MAX_TRAY_ISSUES;
+            let extra = MenuItem::with_id(
+                app,
+                MENU_MORE_ISSUES_ID,
+                format!("+{} more issues…", extra_count),
+                false,
+                None::<&str>,
+            )?;
+            start_submenu.append(&extra)?;
+        }
+
+        menu.append(&start_submenu)?;
+    }
+
+    let refresh_item =
+        MenuItem::with_id(app, MENU_REFRESH_ID, "Refresh Issues", true, None::<&str>)?;
+    menu.append(&refresh_item)?;
+
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+
+    let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    menu.append(&show_item)?;
+    menu.append(&quit_item)?;
+
+    Ok(menu)
+}
+
+fn update_tray_menu<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    issues: &[bridge::Issue],
+    timer_state: &timer::TimerState,
+) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let menu = build_tray_menu(app, issues, timer_state)?;
+        tray.set_menu(Some(menu))?;
+
+        let title = if timer_state.active {
+            let key = timer_state.issue_key.as_deref().unwrap_or("Timer");
+            format!("YT: {} ({})", key, format_elapsed(timer_state.elapsed))
+        } else {
+            "YTracker".to_string()
+        };
+
+        if let Err(err) = tray.set_title(Some(&title)) {
+            eprintln!("Failed to set tray title: {}", err);
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn greet(name: &str) -> String {
+    format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+async fn log_work(
+    issue_key: String,
+    duration: String,
+    comment: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    log_work_native(secrets_clone, &issue_key, &duration, &comment).await
+}
+
+#[tauri::command]
+async fn get_current_user(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::UserProfile, String> {
+    get_current_user_native(&secrets).await
+}
+
+#[tauri::command]
+async fn logout(secrets: tauri::State<'_, SecretsManager>) -> Result<(), String> {
+    secrets
+        .clear_session()
+        .map_err(|err| format!("Failed to clear session: {}", err))
+}
+
+async fn get_current_user_native(secrets: &SecretsManager) -> Result<bridge::UserProfile, String> {
+    let client = build_tracker_client(secrets)?;
+    let profile = client.get_myself().await.map_err(|err| err.to_string())?;
+    Ok(convert_user_profile(profile))
+}
+
+fn convert_user_profile(profile: NativeUserProfile) -> bridge::UserProfile {
+    let avatar_url = profile.avatar();
+    bridge::UserProfile {
+        display: profile.display,
+        login: profile.login,
+        email: profile.email,
+        avatar_url,
+    }
+}
+
+fn canonical_org_type(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "cloud" => "cloud".to_string(),
+        _ => "yandex360".to_string(),
+    }
+}
+
+fn parse_org_type(value: &str) -> OrgType {
+    match value.trim().to_lowercase().as_str() {
+        "cloud" => OrgType::Cloud,
+        _ => OrgType::Yandex360,
+    }
+}
+
+fn build_tracker_client(secrets: &SecretsManager) -> Result<TrackerClient, String> {
+    let session = secrets
+        .get_session()
+        .map_err(|e| format!("Failed to load stored token: {}", e))?
+        .ok_or_else(|| "Not authenticated. Sign in again to continue.".to_string())?;
+    tracker_client_from_session(&session, secrets.get_rate_limiter())
+}
+
+fn tracker_client_from_session(
+    session: &SessionToken,
+    limiter: RateLimiter,
+) -> Result<TrackerClient, String> {
+    let org_type = parse_org_type(&session.org_type);
+    let mut config = TrackerConfig::new(session.token.clone(), org_type);
+    if let Some(org_id) = &session.org_id {
+        config = config.with_org_id(org_id.clone());
+    }
+    TrackerClient::new_with_limiter(config, limiter).map_err(|err| err.to_string())
+}
+
+fn secrets_from_app(app: &tauri::AppHandle) -> Result<SecretsManager, String> {
+    app.try_state::<SecretsManager>()
+        .map(|state| state.inner().clone())
+        .ok_or_else(|| "Secrets manager is not initialized".to_string())
+}
+
+fn convert_issues_native(issues: Vec<NativeIssue>) -> Vec<bridge::Issue> {
+    issues.into_iter().map(convert_issue_native).collect()
+}
+
+fn convert_issue_native(issue: NativeIssue) -> bridge::Issue {
+    let (status_key, status_display) = coerce_field_ref(issue.status.as_ref());
+    let (priority_key, priority_display) = coerce_field_ref(issue.priority.as_ref());
+
+    bridge::Issue {
+        key: issue.key,
+        summary: issue.summary.unwrap_or_default(),
+        description: issue.description.unwrap_or_default(),
+        status: bridge::Status {
+            key: status_key,
+            display: status_display,
+        },
+        priority: bridge::Priority {
+            key: priority_key,
+            display: priority_display,
+        },
+    }
+}
+
+fn coerce_field_ref(field: Option<&NativeIssueFieldRef>) -> (String, String) {
+    let default_key = "unknown".to_string();
+    let default_display = "Unknown".to_string();
+
+    field
+        .and_then(|value| {
+            let key = value.key().filter(|text| !text.trim().is_empty());
+            let label = value
+                .display_value()
+                .as_ref()
+                .and_then(coerce_display_value);
+            match (key, label) {
+                (Some(key), Some(label)) => Some((key, label)),
+                (Some(key), None) => Some((key.clone(), key)),
+                (None, Some(label)) => Some((label.clone(), label)),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| (default_key, default_display))
+}
+
+async fn fetch_issues_native(
+    app: &tauri::AppHandle,
+    query: &str,
+) -> Result<Vec<bridge::Issue>, String> {
+    let secrets = secrets_from_app(app)?;
+    let client = build_tracker_client(&secrets)?;
+    let response = client
+        .search_issues(query, None)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_issues_native(response))
+}
+
+async fn fetch_comments_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<Vec<bridge::Comment>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let comments = client
+        .get_issue_comments(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_comments_native(comments))
+}
+
+async fn fetch_attachments_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<Vec<bridge::Attachment>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let attachments = client
+        .get_issue_attachments(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_attachments_native(attachments))
+}
+
+async fn fetch_issue_detail_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<bridge::Issue, String> {
+    let client = build_tracker_client(&secrets)?;
+    let issue = client
+        .get_issue(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_issue_native(issue))
+}
+
+async fn fetch_statuses_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let statuses = client.get_statuses().await.map_err(|err| err.to_string())?;
+    Ok(convert_simple_entities_native(statuses))
+}
+
+async fn fetch_resolutions_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let resolutions = client
+        .get_resolutions()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_simple_entities_native(resolutions))
+}
+
+fn convert_comments_native(comments: Vec<NativeComment>) -> Vec<bridge::Comment> {
+    comments
+        .into_iter()
+        .map(|comment| bridge::Comment {
+            id: coerce_display_value(&comment.id).unwrap_or_default(),
+            text: comment.text.unwrap_or_default(),
+            author: coerce_comment_author(&comment.created_by),
+            created_at: comment.created_at.unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn convert_attachments_native(attachments: Vec<NativeAttachment>) -> Vec<bridge::Attachment> {
+    attachments
+        .into_iter()
+        .map(|attachment| bridge::Attachment {
+            id: coerce_display_value(&attachment.id).unwrap_or_default(),
+            name: attachment
+                .name
+                .as_ref()
+                .and_then(coerce_display_value)
+                .unwrap_or_else(|| "Attachment".to_string()),
+            url: attachment.content.unwrap_or_default(),
+            mime_type: attachment.mime_type.or(attachment.mimetype),
+        })
+        .collect()
+}
+
+async fn find_attachment_metadata(
+    client: &TrackerClient,
+    issue_key: &str,
+    attachment_id: &str,
+) -> Result<NativeAttachment, String> {
+    let attachments = client
+        .get_issue_attachments(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    attachments
+        .into_iter()
+        .find(|attachment| {
+            coerce_display_value(&attachment.id).as_deref() == Some(attachment_id)
+        })
+        .ok_or_else(|| {
+            format!(
+                "Attachment {} not found on issue {}",
+                attachment_id, issue_key
+            )
+        })
+}
+
+fn attachment_download_url(attachment: &NativeAttachment) -> Result<String, String> {
+    attachment
+        .content
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Attachment is missing download URL".to_string())
+}
+
+fn attachment_mime_type(attachment: &NativeAttachment, response_mime: Option<String>) -> String {
+    response_mime
+        .or_else(|| attachment.mime_type.clone())
+        .or_else(|| attachment.mimetype.clone())
+        .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+fn resolve_download_destination(dest_path: &str) -> Result<PathBuf, String> {
+    let trimmed = dest_path.trim();
+    if trimmed.is_empty() {
+        return Err("Destination path cannot be empty".to_string());
+    }
+
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Ok(PathBuf::from(trimmed));
+    }
+
+    if let Some(mut dir) =
+        UserDirs::new().and_then(|dirs| dirs.download_dir().map(|p| p.to_path_buf()))
+    {
+        dir.push(trimmed);
+        return Ok(dir);
+    }
+
+    env::current_dir()
+        .map_err(|err| err.to_string())
+        .map(|mut cwd| {
+            cwd.push(trimmed);
+            cwd
+        })
+}
+
+async fn download_attachment_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    attachment_id: &str,
+    dest_path: &str,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    let attachment = find_attachment_metadata(&client, issue_key, attachment_id).await?;
+    let url = attachment_download_url(&attachment)?;
+    let binary = client
+        .fetch_binary(&url)
+        .await
+        .map_err(|err| err.to_string())?;
+    let resolved_path = resolve_download_destination(dest_path)?;
+
+    if let Some(parent) = resolved_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            async_fs::create_dir_all(parent)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+    }
+
+    async_fs::write(&resolved_path, &binary.bytes)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+async fn preview_attachment_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    attachment_id: &str,
+) -> Result<bridge::AttachmentPreview, String> {
+    let client = build_tracker_client(&secrets)?;
+    let attachment = find_attachment_metadata(&client, issue_key, attachment_id).await?;
+    let url = attachment_download_url(&attachment)?;
+    let binary = client
+        .fetch_binary(&url)
+        .await
+        .map_err(|err| err.to_string())?;
+    let mime_type = attachment_mime_type(&attachment, binary.mime_type.clone());
+    let data_base64 = BASE64_STANDARD.encode(&binary.bytes);
+    Ok(bridge::AttachmentPreview {
+        mime_type,
+        data_base64,
+    })
+}
+
+async fn preview_inline_resource_native(
+    secrets: SecretsManager,
+    resource_path: &str,
+) -> Result<bridge::AttachmentPreview, String> {
+    if resource_path.trim().is_empty() {
+        return Err("Resource path is empty".to_string());
+    }
+    let client = build_tracker_client(&secrets)?;
+    let binary = client
+        .fetch_binary(resource_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    let mime_type = binary
+        .mime_type
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let data_base64 = BASE64_STANDARD.encode(&binary.bytes);
+    Ok(bridge::AttachmentPreview {
+        mime_type,
+        data_base64,
+    })
+}
+
+async fn add_comment_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    text: &str,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("Comment text cannot be empty".to_string());
+    }
+    let client = build_tracker_client(&secrets)?;
+    client
+        .add_comment(issue_key, text)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn update_issue_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    summary: Option<&str>,
+    description: Option<&str>,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    client
+        .update_issue_fields(issue_key, summary, description)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn fetch_transitions_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<Vec<bridge::Transition>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let transitions = client
+        .get_transitions(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_transitions_native(transitions))
+}
+
+async fn execute_transition_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    transition_id: &str,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    client
+        .execute_transition(issue_key, transition_id, None, None)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn log_work_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    duration: &str,
+    comment: &str,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    let duration_iso = parse_duration_to_iso(duration)?;
+    let start = current_timestamp_iso();
+    let trimmed_comment = comment.trim();
+    let comment_ref = if trimmed_comment.is_empty() {
+        None
+    } else {
+        Some(trimmed_comment)
+    };
+    client
+        .log_work_entry(issue_key, &start, &duration_iso, comment_ref)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+fn current_timestamp_iso() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn parse_duration_to_iso(input: &str) -> Result<String, String> {
+    let normalized = input.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Err("Duration cannot be empty".to_string());
+    }
+
+    let mut weeks = 0u64;
+    let mut days = 0u64;
+    let mut hours = 0u64;
+    let mut minutes = 0u64;
+
+    for capture in DURATION_TOKEN_REGEX.captures_iter(&normalized) {
+        let value = capture[1]
+            .parse::<u64>()
+            .map_err(|_| "Invalid duration value".to_string())?;
+        match &capture[2] {
+            "w" => weeks += value,
+            "d" => days += value,
+            "h" => hours += value,
+            "m" => minutes += value,
+            _ => {}
+        }
+    }
+
+    if weeks == 0 && days == 0 && hours == 0 && minutes == 0 {
+        if let Ok(value) = normalized.parse::<u64>() {
+            minutes = value;
+        } else if let Ok(value) = normalized.parse::<f64>() {
+            let whole_hours = value.trunc();
+            let fractional = value - whole_hours;
+            hours = whole_hours as u64;
+            let fractional_minutes = (fractional * 60.0).round();
+            if fractional_minutes > 0.0 {
+                minutes = fractional_minutes as u64;
+            }
+        }
+    }
+
+    if weeks == 0 && days == 0 && hours == 0 && minutes == 0 {
+        return Err("Duration resolves to zero".to_string());
+    }
+
+    let mut iso = String::from("P");
+    if weeks > 0 {
+        iso.push_str(&format!("{}W", weeks));
+    }
+    if days > 0 {
+        iso.push_str(&format!("{}D", days));
+    }
+    if hours > 0 || minutes > 0 {
+        iso.push('T');
+        if hours > 0 {
+            iso.push_str(&format!("{}H", hours));
+        }
+        if minutes > 0 {
+            iso.push_str(&format!("{}M", minutes));
+        }
+    }
+
+    if iso == "P" {
+        iso.push_str("T0M");
+    }
+
+    Ok(iso)
+}
+
+fn convert_simple_entities_native(entities: Vec<NativeSimpleEntity>) -> Vec<bridge::SimpleEntity> {
+    entities
+        .into_iter()
+        .map(convert_simple_entity_native)
+        .collect()
+}
+
+fn convert_simple_entity_native(entity: NativeSimpleEntity) -> bridge::SimpleEntity {
+    let key = entity
+        .key
+        .or(entity.id)
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let display = entity
+        .display
+        .as_ref()
+        .and_then(coerce_display_value)
+        .or_else(|| entity.name.as_ref().and_then(coerce_display_value))
+        .unwrap_or_else(|| key.clone());
+
+    bridge::SimpleEntity { key, display }
+}
+
+fn coerce_display_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Object(map) => {
+            for key in ["display", "name", "value", "en", "ru"] {
+                if let Some(candidate) = map.get(key) {
+                    if let Some(text) = coerce_display_value(candidate) {
+                        return Some(text);
+                    }
+                }
+            }
+            map.values().find_map(coerce_display_value)
+        }
+        Value::Array(items) => items.iter().find_map(coerce_display_value),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Null => None,
+    }
+}
+
+fn coerce_comment_author(author: &Option<NativeCommentAuthor>) -> String {
+    author
+        .as_ref()
+        .and_then(|user| {
+            user.display
+                .as_ref()
+                .and_then(coerce_display_value)
+                .or_else(|| user.login.clone())
+                .or_else(|| user.email.clone())
+        })
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn convert_transitions_native(transitions: Vec<NativeTransition>) -> Vec<bridge::Transition> {
+    transitions
+        .into_iter()
+        .map(|transition| bridge::Transition {
+            id: transition.id.unwrap_or_else(|| "unknown".to_string()),
+            name: transition
+                .display
+                .as_ref()
+                .and_then(coerce_display_value)
+                .or_else(|| transition.name.as_ref().and_then(coerce_display_value))
+                .unwrap_or_else(|| "Transition".to_string()),
+            to_status: convert_transition_status(transition.status.as_ref())
+                .or_else(|| convert_transition_status(transition.to.as_ref())),
+        })
+        .collect()
+}
+
+fn convert_transition_status(
+    status: Option<&ytracker_api::TransitionDestination>,
+) -> Option<bridge::Status> {
+    status.and_then(|destination| {
+        let key = destination
+            .key
+            .clone()
+            .or(destination.id.clone())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let display = destination
+            .display
+            .as_ref()
+            .and_then(coerce_display_value)
+            .or_else(|| destination.name.as_ref().and_then(coerce_display_value));
+
+        match (key, display) {
+            (Some(key), Some(display)) => Some(bridge::Status { key, display }),
+            (Some(key), None) => Some(bridge::Status {
+                display: key.clone(),
+                key,
+            }),
+            _ => None,
+        }
+    })
+}
+
+#[tauri::command]
+fn get_config() -> Config {
+    let cm = ConfigManager::new();
+    cm.load()
+}
+
+#[tauri::command]
+fn save_config(config: Config) -> Result<(), String> {
+    let cm = ConfigManager::new();
+    cm.save(&config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_client_credentials_info(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<ClientCredentialsInfo, String> {
+    let manager = secrets.inner().clone();
+    let info = task::spawn_blocking(move || manager.get_public_info())
+        .await
+        .map_err(|err| format!("Failed to load client credentials info: {}", err))??;
+    Ok(info)
+}
+
+#[tauri::command]
+async fn has_session(secrets: tauri::State<'_, SecretsManager>) -> Result<bool, String> {
+    let manager = secrets.inner().clone();
+    let has_session = task::spawn_blocking(move || manager.get_session())
+        .await
+        .map_err(|err| format!("Failed to check session: {}", err))??
+        .is_some();
+    Ok(has_session)
+}
+
+#[tauri::command]
+async fn exchange_code(
+    code: String,
+    org_id: Option<String>,
+    org_type: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bool, String> {
+    let credentials = secrets
+        .get_credentials()
+        .map_err(|e| format!("Failed to read client credentials: {}", e))?
+        .ok_or_else(|| {
+            "Client credentials are missing. Configure your OAuth app credentials before logging in."
+                .to_string()
+        })?;
+
+    let normalized_org_type = canonical_org_type(&org_type);
+    let token_response =
+        auth::exchange_code(&code, &credentials.client_id, &credentials.client_secret)
+            .await
+            .map_err(|err| err.to_string())?;
+
+    secrets.save_session(
+        &token_response.access_token,
+        org_id.as_deref(),
+        &normalized_org_type,
+    )?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+async fn get_issues(
+    app: tauri::AppHandle,
+    issue_store: tauri::State<'_, IssueStore>,
+    timer: tauri::State<'_, Arc<Timer>>,
+    query: Option<String>,
+) -> Result<Vec<bridge::Issue>, String> {
+    refresh_issue_cache(
+        app,
+        issue_store.inner().clone(),
+        timer.inner().clone(),
+        query,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_issue(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::Issue, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_issue_detail_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn get_comments(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::Comment>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_comments_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn add_comment(
+    issue_key: String,
+    text: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    add_comment_native(secrets_clone, &issue_key, &text).await
+}
+
+#[tauri::command]
+async fn update_issue(
+    issue_key: String,
+    summary: Option<String>,
+    description: Option<String>,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    update_issue_native(
+        secrets_clone,
+        &issue_key,
+        summary.as_deref(),
+        description.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn get_attachments(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::Attachment>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_attachments_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn get_statuses(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_statuses_native(secrets_clone).await
+}
+
+#[tauri::command]
+async fn get_resolutions(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_resolutions_native(secrets_clone).await
+}
+
+#[tauri::command]
+async fn download_attachment(
+    issue_key: String,
+    attachment_id: String,
+    dest_path: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    download_attachment_native(secrets_clone, &issue_key, &attachment_id, &dest_path).await
+}
+
+#[tauri::command]
+async fn preview_attachment(
+    issue_key: String,
+    attachment_id: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::AttachmentPreview, String> {
+    let secrets_clone = secrets.inner().clone();
+    preview_attachment_native(secrets_clone, &issue_key, &attachment_id).await
+}
+
+#[tauri::command]
+async fn preview_inline_image(
+    path: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::AttachmentPreview, String> {
+    let secrets_clone = secrets.inner().clone();
+    preview_inline_resource_native(secrets_clone, &path).await
+}
+
+#[tauri::command]
+async fn get_transitions(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::Transition>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_transitions_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn execute_transition(
+    issue_key: String,
+    transition_id: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    execute_transition_native(secrets_clone, &issue_key, &transition_id).await
+}
+
+#[tauri::command]
+fn start_timer(
+    app: tauri::AppHandle,
+    timer: tauri::State<'_, Arc<Timer>>,
+    issue_store: tauri::State<'_, IssueStore>,
+    issue_key: String,
+    issue_summary: Option<String>,
+) {
+    timer.start(issue_key, issue_summary);
+    broadcast_timer_state(&app, &timer, issue_store.inner());
+}
+
+#[tauri::command]
+fn stop_timer(
+    app: tauri::AppHandle,
+    timer: tauri::State<'_, Arc<Timer>>,
+    issue_store: tauri::State<'_, IssueStore>,
+) -> (u64, Option<String>) {
+    let result = timer.stop();
+    broadcast_timer_state(&app, &timer, issue_store.inner());
+    result
+}
+
+#[tauri::command]
+fn get_timer_state(state: tauri::State<Arc<Timer>>) -> timer::TimerState {
+    state.get_state()
+}
+
+fn emit_update_available_event(app: &tauri::AppHandle, update: &Update, automatic: bool) {
+    let payload = UpdateAvailablePayload {
+        version: update.version.to_string(),
+        notes: update.body.clone(),
+        pub_date: update.date.as_ref().map(|date| date.to_string()),
+        automatic,
+    };
+
+    if let Err(err) = app.emit("updater://available", &payload) {
+        eprintln!("Failed to emit updater event: {}", err);
+    }
+}
+
+async fn check_for_updates_and_emit(
+    app: tauri::AppHandle,
+    automatic: bool,
+) -> Result<(), UpdaterError> {
+    if let Some(update) = app.updater()?.check().await? {
+        emit_update_available_event(&app, &update, automatic);
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let timer = Arc::new(Timer::new());
+    let timer_for_thread = timer.clone();
+    let timer_for_tray_setup = timer.clone();
+    let timer_for_tray_events = timer.clone();
+    let timer_for_refresh_loop = timer.clone();
+
+    let issue_store = IssueStore::default();
+    let issue_store_for_setup = issue_store.clone();
+    let issue_store_for_events = issue_store.clone();
+    let issue_store_for_thread_loop = issue_store.clone();
+    let issue_store_for_refresh_loop = issue_store.clone();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(timer.clone())
+        .manage(issue_store.clone())
+        .setup(move |app| {
+            let app_handle = app.handle();
+            let secrets_manager = SecretsManager::initialize(&app_handle)?;
+            app.manage(secrets_manager);
+
+            let startup_update_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(err) = check_for_updates_and_emit(startup_update_handle, true).await {
+                    eprintln!("Automatic update check failed: {}", err);
+                }
+            });
+            let initial_issues = issue_store_for_setup.snapshot();
+            let initial_state = timer_for_tray_setup.get_state();
+            let initial_menu = build_tray_menu(&app_handle, &initial_issues, &initial_state)?;
+
+            let tray_timer = timer_for_tray_events.clone();
+            let tray_issue_store = issue_store_for_events.clone();
+
+            let _tray = TrayIconBuilder::with_id(TRAY_ID)
+                .menu(&initial_menu)
+                .icon(app.default_window_icon().unwrap().clone())
+                .on_menu_event(move |app, event| match event.id.as_ref() {
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    MENU_REFRESH_ID => {
+                        let app_handle = app.clone();
+                        let issue_store = tray_issue_store.clone();
+                        let timer = tray_timer.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) =
+                                refresh_issue_cache(app_handle, issue_store, timer, None).await
+                            {
+                                eprintln!("Failed to refresh issues from tray: {}", err);
+                            }
+                        });
+                    }
+                    MENU_STOP_ID => {
+                        let (elapsed, maybe_key) = tray_timer.stop();
+                        broadcast_timer_state(app, &tray_timer, &tray_issue_store);
+                        if let Some(issue_key) = maybe_key.as_deref() {
+                            notify_timer_stopped(app, issue_key, elapsed);
+                        }
+                    }
+                    id if id.starts_with(ISSUE_MENU_PREFIX) => {
+                        let issue_key = &id[ISSUE_MENU_PREFIX.len()..];
+                        let current_state = tray_timer.get_state();
+                        if current_state.issue_key.as_deref() == Some(issue_key) {
+                            return;
+                        }
+
+                        let summary = tray_issue_store.find(issue_key).map(|issue| issue.summary);
+                        tray_timer.start(issue_key.to_string(), summary.clone());
+                        broadcast_timer_state(app, &tray_timer, &tray_issue_store);
+                        notify_timer_started(app, issue_key, summary.as_deref());
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            let _ = update_tray_menu(&app_handle, &initial_issues, &initial_state);
+
+            let refresh_app_handle = app_handle.clone();
+            let refresh_issue_store = issue_store_for_refresh_loop.clone();
+            let refresh_timer = timer_for_refresh_loop.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    if let Err(err) = refresh_issue_cache(
+                        refresh_app_handle.clone(),
+                        refresh_issue_store.clone(),
+                        refresh_timer.clone(),
+                        None,
+                    )
+                    .await
+                    {
+                        eprintln!("Background issue refresh failed: {}", err);
+                    }
+                    sleep(std::time::Duration::from_secs(ISSUE_REFRESH_INTERVAL_SECS)).await;
+                }
+            });
+
+            let event_handle = app_handle.clone();
+            let notification_handle = app_handle.clone();
+            let tray_update_handle = app_handle.clone();
+            let thread_issue_store = issue_store_for_thread_loop.clone();
+            std::thread::spawn(move || {
+                let config_manager = ConfigManager::new();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    let state = timer_for_thread.get_state();
+                    if state.active {
+                        let _ = event_handle.emit("timer-tick", &state);
+                        if let Err(err) = update_tray_menu(
+                            &tray_update_handle,
+                            &thread_issue_store.snapshot(),
+                            &state,
+                        ) {
+                            eprintln!("Failed to refresh tray menu: {}", err);
+                        }
+                    }
+
+                    let interval_minutes = config_manager.load().timer_notification_interval.max(1);
+                    if let Some(snapshot) =
+                        timer_for_thread.check_notification_due(interval_minutes as u64 * 60)
+                    {
+                        let title = snapshot
+                            .issue_key
+                            .clone()
+                            .unwrap_or_else(|| "Task timer".to_string());
+                        let summary = snapshot
+                            .issue_summary
+                            .clone()
+                            .unwrap_or_else(|| "Timer running".to_string());
+                        let body = format!(
+                            "{}\nTime spent: {}",
+                            summary,
+                            format_elapsed(snapshot.elapsed)
+                        );
+
+                        if let Err(err) = notification_handle
+                            .notification()
+                            .builder()
+                            .title(title)
+                            .body(body)
+                            .show()
+                        {
+                            eprintln!("Failed to show notification: {}", err);
+                        }
+                    }
+                }
+            });
+            Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                window.hide().unwrap();
+                api.prevent_close();
+            }
+            _ => {}
+        })
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            get_issues,
+            get_issue,
+            get_comments,
+            add_comment,
+            update_issue,
+            get_attachments,
+            get_statuses,
+            get_resolutions,
+            download_attachment,
+            preview_attachment,
+            preview_inline_image,
+            get_transitions,
+            execute_transition,
+            start_timer,
+            stop_timer,
+            get_timer_state,
+            get_config,
+            save_config,
+            get_client_credentials_info,
+            has_session,
+            exchange_code,
+            log_work,
+            get_current_user,
+            logout
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

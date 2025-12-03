@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", "Cantarell", "Nunito Sans", system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@layer base {
+  body {
+    @apply text-slate-900 dark:text-slate-50 min-h-screen;
+    background-image: radial-gradient(circle at 20% 20%, #ffffff, #e1e7f5 55%),
+      radial-gradient(circle at 80% 0%, #f8fbff, #d7e1f4 65%),
+      linear-gradient(180deg, #eff3fb, #dfe7f5);
+    background-attachment: fixed;
+  }
+
+  html.dark body {
+    background-image: radial-gradient(circle at 20% 20%, #1f2336, #0f172a 50%),
+      radial-gradient(circle at 80% 0%, #1e2440, #0f172a 65%),
+      linear-gradient(180deg, #0b1221, #050914);
+  }
+
+  ::selection {
+    background: rgba(53, 132, 228, 0.25);
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-white/80 dark:bg-slate-900/80 border border-white/60 dark:border-slate-800/80 backdrop-blur-xl;
+    border-radius: 28px;
+    box-shadow: 0 20px 60px rgba(15, 23, 42, 0.15);
+  }
+
+  html.dark .glass-panel {
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.65);
+  }
+
+  .app-shell {
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    min-height: 100vh;
+  }
+
+  html.dark .app-shell {
+    box-shadow: none;
+  }
+
+  .gtk-card {
+    @apply bg-white/90 dark:bg-slate-900/70 border border-white/60 dark:border-slate-800/70 rounded-2xl backdrop-blur;
+    box-shadow: 0 15px 40px rgba(15, 23, 42, 0.08);
+  }
+
+  html.dark .gtk-card {
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.6);
+  }
+
+  .gtk-section-title {
+    @apply text-xs font-semibold uppercase text-slate-500 dark:text-slate-400 mb-3;
+    letter-spacing: 0.25em;
+  }
+
+  .status-pill {
+    @apply inline-flex items-center gap-2 px-3 py-1 text-xs font-semibold rounded-full tracking-wide uppercase;
+  }
+
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+  }
+
+  .status-open {
+    background-color: #9e9e9e;
+  }
+
+  .status-inProgress {
+    background-color: #3584e4;
+  }
+
+  .status-inReview {
+    background-color: #f6d32d;
+  }
+
+  .status-needInfo {
+    background-color: #9141ac;
+  }
+
+  .status-readyForTest {
+    background-color: #ff7800;
+  }
+
+  .status-closed {
+    background-color: #2ec27e;
+  }
+
+  .priority-critical {
+    color: #e01b24;
+  }
+
+  .priority-major {
+    color: #ff7800;
+  }
+}
