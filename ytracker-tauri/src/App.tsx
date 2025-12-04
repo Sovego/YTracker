@@ -474,8 +474,8 @@ function App() {
                       onClick={() => void handleApplyFilters()}
                       disabled={!hasPendingFilterChanges || loading}
                       className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border text-sm font-semibold transition ${!hasPendingFilterChanges || loading
-                          ? "bg-white/40 dark:bg-slate-900/30 border-white/40 dark:border-slate-800/40 text-slate-400"
-                          : "bg-blue-600 text-white border-blue-500 hover:bg-blue-500"
+                        ? "bg-white/40 dark:bg-slate-900/30 border-white/40 dark:border-slate-800/40 text-slate-400"
+                        : "bg-blue-600 text-white border-blue-500 hover:bg-blue-500"
                         }`}
                     >
                       Apply
