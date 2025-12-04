@@ -26,6 +26,13 @@ export interface IssuePage {
     hasMore: boolean;
 }
 
+export type TrackerFilterPayload = Record<string, unknown>;
+
+export interface IssueSearchOptions {
+    query?: string | null;
+    filter?: TrackerFilterPayload | null;
+}
+
 export interface TimerState {
     active: boolean;
     issue_key: string | null;
@@ -162,13 +169,58 @@ const detailCache = {
 };
 
 const DEFAULT_ISSUE_QUERY_KEY = "__default__";
+const DEFAULT_FILTER_KEY = "__nofilter__";
 const SCROLL_ROOT_KEY = "__scroll_root__";
 const issueFetchPromises = new Map<string, Promise<IssuePage>>();
 
-const getIssueFetchKey = (query?: string, scrollId?: string | null) => {
-    const normalizedQuery = query?.trim() || DEFAULT_ISSUE_QUERY_KEY;
+const stableSerialize = (value: unknown): string => {
+    if (value === null || value === undefined) {
+        return "null";
+    }
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+    }
+    if (typeof value === "object") {
+        const entries = Object.entries(value as Record<string, unknown>)
+            .filter(([, v]) => v !== undefined)
+            .sort(([a], [b]) => a.localeCompare(b));
+        return `{${entries
+            .map(([key, val]) => `${JSON.stringify(key)}:${stableSerialize(val)}`)
+            .join(",")}}`;
+    }
+    return JSON.stringify(value);
+};
+
+const normalizeFilterPayload = (filter?: TrackerFilterPayload | null) => {
+    if (!filter) return undefined;
+    const normalizedEntries = Object.entries(filter).filter(([, value]) => value !== undefined && value !== null);
+    if (normalizedEntries.length === 0) {
+        return undefined;
+    }
+    return normalizedEntries.reduce<TrackerFilterPayload>((acc, [key, value]) => {
+        acc[key] = value as unknown;
+        return acc;
+    }, {});
+};
+
+const normalizeIssueOptions = (options?: IssueSearchOptions | null): IssueSearchOptions | undefined => {
+    if (!options) return undefined;
+    const query = options.query?.trim();
+    const filter = normalizeFilterPayload(options.filter);
+    if (!query && !filter) {
+        return undefined;
+    }
+    return {
+        query: query || undefined,
+        filter,
+    };
+};
+
+const getIssueFetchKey = (options?: IssueSearchOptions, scrollId?: string | null) => {
+    const queryKey = options?.query || DEFAULT_ISSUE_QUERY_KEY;
+    const filterKey = options?.filter ? stableSerialize(options.filter) : DEFAULT_FILTER_KEY;
     const normalizedScroll = scrollId?.trim() || SCROLL_ROOT_KEY;
-    return `${normalizedQuery}::${normalizedScroll}`;
+    return `${queryKey}::${filterKey}::${normalizedScroll}`;
 };
 
 const normalizeIssuePage = (payload: IssuePageResponse): IssuePage => ({
@@ -178,13 +230,14 @@ const normalizeIssuePage = (payload: IssuePageResponse): IssuePage => ({
     hasMore: payload.has_more ?? false,
 });
 
-const requestIssuePage = async (query?: string, scrollId?: string | null) => {
-    const key = getIssueFetchKey(query, scrollId);
+const requestIssuePage = async (options?: IssueSearchOptions, scrollId?: string | null) => {
+    const key = getIssueFetchKey(options, scrollId);
     let existing = issueFetchPromises.get(key);
     if (!existing) {
         const promise = invoke<IssuePageResponse>("get_issues", {
-            query: query ?? null,
-            scroll_id: scrollId ?? null,
+            query: options?.query ?? null,
+            filter: options?.filter ?? null,
+            scrollId: scrollId ?? null,
         })
             .then(normalizeIssuePage)
             .finally(() => {
@@ -226,6 +279,63 @@ let cachedStatuses: SimpleEntity[] | null = null;
 let statusesPromise: Promise<SimpleEntity[]> | null = null;
 let cachedResolutions: SimpleEntity[] | null = null;
 let resolutionsPromise: Promise<SimpleEntity[]> | null = null;
+let cachedQueuesDirectory: SimpleEntity[] | null = null;
+let queuesDirectoryPromise: Promise<SimpleEntity[]> | null = null;
+let cachedProjectsDirectory: SimpleEntity[] | null = null;
+let projectsDirectoryPromise: Promise<SimpleEntity[]> | null = null;
+let cachedUsersDirectory: UserProfile[] | null = null;
+let usersDirectoryPromise: Promise<UserProfile[]> | null = null;
+
+const fetchQueuesDirectory = async (force = false): Promise<SimpleEntity[]> => {
+    if (!force && cachedQueuesDirectory) return cachedQueuesDirectory;
+    if (!force && queuesDirectoryPromise) return queuesDirectoryPromise;
+    const promise = invoke<SimpleEntity[]>("get_queues")
+        .then((data) => {
+            cachedQueuesDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (queuesDirectoryPromise === promise) {
+                queuesDirectoryPromise = null;
+            }
+        });
+    queuesDirectoryPromise = promise;
+    return promise;
+};
+
+const fetchProjectsDirectory = async (force = false): Promise<SimpleEntity[]> => {
+    if (!force && cachedProjectsDirectory) return cachedProjectsDirectory;
+    if (!force && projectsDirectoryPromise) return projectsDirectoryPromise;
+    const promise = invoke<SimpleEntity[]>("get_projects")
+        .then((data) => {
+            cachedProjectsDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (projectsDirectoryPromise === promise) {
+                projectsDirectoryPromise = null;
+            }
+        });
+    projectsDirectoryPromise = promise;
+    return promise;
+};
+
+const fetchUsersDirectory = async (force = false): Promise<UserProfile[]> => {
+    if (!force && cachedUsersDirectory) return cachedUsersDirectory;
+    if (!force && usersDirectoryPromise) return usersDirectoryPromise;
+    const promise = invoke<UserProfile[]>("get_users")
+        .then((data) => {
+            cachedUsersDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (usersDirectoryPromise === promise) {
+                usersDirectoryPromise = null;
+            }
+        });
+    usersDirectoryPromise = promise;
+    return promise;
+};
 
 const isFresh = <T>(entry?: CacheEntry<T> | null) => {
     if (!entry) return false;
@@ -397,7 +507,7 @@ export function useTracker() {
     const [error, setError] = useState<string | null>(null);
     const [hasMore, setHasMore] = useState(false);
 
-    const currentQueryRef = useRef<string | undefined>(undefined);
+    const currentOptionsRef = useRef<IssueSearchOptions | undefined>(undefined);
     const nextScrollIdRef = useRef<string | null>(null);
 
     const releaseScrollSnapshot = useCallback((targetId?: string | null) => {
@@ -406,7 +516,7 @@ export function useTracker() {
             return;
         }
         nextScrollIdRef.current = null;
-        void invoke("release_scroll_context", { scroll_id: scrollId }).catch((err) => {
+        void invoke("release_scroll_context", { scrollId: scrollId }).catch((err) => {
             console.warn("Failed to release scroll context", err);
         });
     }, []);
@@ -417,19 +527,19 @@ export function useTracker() {
         };
     }, [releaseScrollSnapshot]);
 
-    const fetchIssues = useCallback(async (query?: string): Promise<boolean> => {
+    const fetchIssues = useCallback(async (options?: IssueSearchOptions): Promise<boolean> => {
         setLoading(true);
         setError(null);
 
-        const normalizedQuery = query?.trim() || undefined;
-        currentQueryRef.current = normalizedQuery;
+        const resolvedOptions = options === undefined ? currentOptionsRef.current : normalizeIssueOptions(options);
+        currentOptionsRef.current = resolvedOptions;
 
         if (nextScrollIdRef.current) {
             releaseScrollSnapshot();
         }
 
         try {
-            const page = await requestIssuePage(normalizedQuery, null);
+            const page = await requestIssuePage(resolvedOptions, null);
             nextScrollIdRef.current = page.nextScrollId;
             setIssues(page.issues);
             setHasMore(page.hasMore);
@@ -457,7 +567,7 @@ export function useTracker() {
         setError(null);
 
         try {
-            const page = await requestIssuePage(currentQueryRef.current, scrollId);
+            const page = await requestIssuePage(currentOptionsRef.current, scrollId);
             nextScrollIdRef.current = page.nextScrollId;
             setHasMore(page.hasMore);
             setIssues((prev) => mergeIssueLists(prev, page.issues));
@@ -471,6 +581,48 @@ export function useTracker() {
     }, [loading, loadingMore]);
 
     return { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore };
+}
+
+export function useFilterCatalogs() {
+    const [queues, setQueues] = useState<SimpleEntity[]>(cachedQueuesDirectory ?? []);
+    const [projects, setProjects] = useState<SimpleEntity[]>(cachedProjectsDirectory ?? []);
+    const [users, setUsers] = useState<UserProfile[]>(cachedUsersDirectory ?? []);
+    const [loading, setLoading] = useState(
+        !cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory
+    );
+    const [error, setError] = useState<string | null>(null);
+
+    const refresh = useCallback(async (force = false) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const [queueData, projectData, userData] = await Promise.all([
+                fetchQueuesDirectory(force),
+                fetchProjectsDirectory(force),
+                fetchUsersDirectory(force),
+            ]);
+            setQueues(queueData);
+            setProjects(projectData);
+            setUsers(userData);
+            return { queueData, projectData, userData };
+        } catch (err) {
+            const message = String(err);
+            setError(message);
+            throw err;
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory) {
+            void refresh();
+        } else {
+            setLoading(false);
+        }
+    }, [refresh]);
+
+    return { queues, projects, users, loading, error, refresh };
 }
 
 export function useTimer() {

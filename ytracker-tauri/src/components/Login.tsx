@@ -164,7 +164,7 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
                         </div>
                         <div>
                             <label htmlFor="orgId" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                                Org ID (Optional)
+                                Org ID
                             </label>
                             <input
                                 id="orgId"

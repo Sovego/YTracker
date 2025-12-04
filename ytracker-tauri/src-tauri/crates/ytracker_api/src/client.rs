@@ -13,7 +13,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_LANGUAGE, AUTHO
 use reqwest::{Client as HttpClient, Method, Response, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map as JsonMap, Value};
 
 #[derive(Clone)]
 pub struct TrackerClient {
@@ -21,6 +21,9 @@ pub struct TrackerClient {
     config: TrackerConfig,
     limiter: RateLimiter,
 }
+
+const FILTER_PAGE_LIMIT: u32 = 10;
+const FILTER_PAGE_SIZE: u32 = 200;
 
 impl TrackerClient {
     pub fn new(config: TrackerConfig) -> Result<Self> {
@@ -190,20 +193,20 @@ impl TrackerClient {
         self.get_with_query(&path, Some(&[("fields", ISSUE_SUMMARY_FIELDS)])).await
     }
 
-    pub async fn search_issues(&self, query: &str, per_page: Option<u32>) -> Result<Vec<TrackerIssue>> {
+    pub async fn search_issues(&self, params: &IssueSearchParams, per_page: Option<u32>) -> Result<Vec<TrackerIssue>> {
         let per_page = per_page.unwrap_or(100).clamp(1, 500);
         self.limiter.hit().await;
         let url = format!("{}issues/_search", self.config.api_root());
-        let params = [
+        let paging_params = [
             ("perPage", per_page.to_string()),
             ("page", "1".to_string()),
             ("fields", ISSUE_SUMMARY_FIELDS.to_string()),
         ];
-        let payload = IssueSearchRequest::new(query);
+        let payload = IssueSearchRequest::from_params(params);
         let response = self
             .http
             .post(url)
-            .query(&params)
+            .query(&paging_params)
             .json(&payload)
             .send()
             .await?;
@@ -212,7 +215,7 @@ impl TrackerClient {
 
     pub async fn search_issues_scroll(
         &self,
-        query: &str,
+        params: &IssueSearchParams,
         scroll_id: Option<&str>,
         per_scroll: Option<u32>,
         scroll_type: ScrollType,
@@ -220,25 +223,25 @@ impl TrackerClient {
     ) -> Result<ScrollPage<TrackerIssue>> {
         self.limiter.hit().await;
         let url = format!("{}issues/_search", self.config.api_root());
-        let mut params = vec![("fields", ISSUE_SUMMARY_FIELDS.to_string())];
+        let mut request_params = vec![("fields", ISSUE_SUMMARY_FIELDS.to_string())];
 
         if let Some(id) = scroll_id {
-            params.push(("scrollId", id.to_string()));
+            request_params.push(("scrollId", id.to_string()));
         } else {
             let per_scroll = per_scroll.unwrap_or(100).clamp(1, 1000);
-            params.push(("scrollType", scroll_type.as_str().to_string()));
-            params.push(("perScroll", per_scroll.to_string()));
+            request_params.push(("scrollType", scroll_type.as_str().to_string()));
+            request_params.push(("perScroll", per_scroll.to_string()));
         }
 
         if let Some(ttl) = scroll_ttl_millis {
-            params.push(("scrollTTLMillis", ttl.to_string()));
+            request_params.push(("scrollTTLMillis", ttl.to_string()));
         }
 
-        let payload = IssueSearchRequest::new(query);
+        let payload = IssueSearchRequest::from_params(params);
         let response = self
             .http
             .post(url)
-            .query(&params)
+            .query(&request_params)
             .json(&payload)
             .send()
             .await?;
@@ -354,6 +357,90 @@ impl TrackerClient {
         let bytes = response.bytes().await?.to_vec();
         Ok(BinaryContent { bytes, mime_type })
     }
+
+    pub async fn list_all_queues(&self) -> Result<Vec<SimpleEntityRaw>> {
+        self.fetch_simple_entity_pages("queues").await
+    }
+
+    pub async fn list_all_projects(&self) -> Result<Vec<SimpleEntityRaw>> {
+        self.fetch_simple_entity_pages("projects").await
+    }
+
+    pub async fn list_all_users(&self) -> Result<Vec<UserProfile>> {
+        self.fetch_user_pages("users").await
+    }
+
+    async fn fetch_simple_entity_pages(&self, path: &str) -> Result<Vec<SimpleEntityRaw>> {
+        let mut results = Vec::new();
+        let base_url = self.url_for(path);
+        let mut page = 1;
+        let per_page = FILTER_PAGE_SIZE.clamp(1, 500);
+
+        loop {
+            if page > FILTER_PAGE_LIMIT {
+                break;
+            }
+            self.limiter.hit().await;
+            let query = vec![
+                ("perPage".to_string(), per_page.to_string()),
+                ("page".to_string(), page.to_string()),
+            ];
+            let response = self
+                .http
+                .get(base_url.clone())
+                .query(&query)
+                .send()
+                .await?;
+            let chunk: Vec<SimpleEntityRaw> = Self::parse_json(response).await?;
+            let count = chunk.len();
+            if count == 0 {
+                break;
+            }
+            results.extend(chunk);
+            if count < per_page as usize {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(results)
+    }
+
+    async fn fetch_user_pages(&self, path: &str) -> Result<Vec<UserProfile>> {
+        let mut results = Vec::new();
+        let base_url = self.url_for(path);
+        let mut page = 1;
+        let per_page = FILTER_PAGE_SIZE.clamp(1, 500);
+
+        loop {
+            if page > FILTER_PAGE_LIMIT {
+                break;
+            }
+            self.limiter.hit().await;
+            let query = vec![
+                ("perPage".to_string(), per_page.to_string()),
+                ("page".to_string(), page.to_string()),
+            ];
+            let response = self
+                .http
+                .get(base_url.clone())
+                .query(&query)
+                .send()
+                .await?;
+            let chunk: Vec<UserProfile> = Self::parse_json(response).await?;
+            let count = chunk.len();
+            if count == 0 {
+                break;
+            }
+            results.extend(chunk);
+            if count < per_page as usize {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(results)
+    }
 }
 
 fn build_http_client(config: &TrackerConfig) -> Result<HttpClient> {
@@ -452,6 +539,18 @@ pub struct ScrollPage<T> {
     pub total_count: Option<u64>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct IssueSearchParams {
+    pub query: Option<String>,
+    pub filter: Option<JsonMap<String, Value>>,
+}
+
+impl IssueSearchParams {
+    pub fn new(query: Option<String>, filter: Option<JsonMap<String, Value>>) -> Self {
+        Self { query, filter }
+    }
+}
+
 const ISSUE_SUMMARY_FIELDS: &str = "key,summary,description,status,priority";
 
 #[derive(Debug, Serialize)]
@@ -490,32 +589,30 @@ pub struct BinaryContent {
 }
 
 #[derive(Serialize)]
-struct IssueSearchRequest<'a> {
+struct IssueSearchRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
-    query: Option<&'a str>,
+    query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    filter: Option<IssueSearchFilter<'a>>,
+    filter: Option<JsonMap<String, Value>>,
 }
 
-impl<'a> IssueSearchRequest<'a> {
-    fn new(query: &'a str) -> Self {
-        if query.trim().is_empty() {
-            Self {
-                query: None,
-                filter: None,
-            }
-        } else {
-            let trimmed = query.trim();
-            Self {
-                query: Some(trimmed),
-                filter: None,
-            }
+impl IssueSearchRequest {
+    fn from_params(params: &IssueSearchParams) -> Self {
+        let normalized_query = params
+            .query
+            .as_ref()
+            .and_then(|q| {
+                let trimmed = q.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+
+        Self {
+            query: normalized_query,
+            filter: params.filter.clone(),
         }
     }
-}
-
-#[derive(Serialize)]
-struct IssueSearchFilter<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    query: Option<&'a str>,
 }

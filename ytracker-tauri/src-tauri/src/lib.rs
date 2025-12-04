@@ -5,7 +5,8 @@ use directories::UserDirs;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map as JsonMap, Value};
+use std::collections::HashSet;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,9 +19,9 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterExt};
 use tokio::{fs as async_fs, task, time::sleep};
 
-mod bridge;
 mod config;
 mod issue_store;
+mod bridge;
 mod secrets;
 mod timer;
 use config::{Config, ConfigManager};
@@ -29,11 +30,11 @@ use secrets::{ClientCredentialsInfo, SecretsManager, SessionToken};
 use timer::Timer;
 use ytracker_api::models::CommentAuthor as NativeCommentAuthor;
 use ytracker_api::rate_limiter::RateLimiter;
+use ytracker_api::client::IssueSearchParams;
 use ytracker_api::{
     auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment, Issue as NativeIssue,
-    IssueFieldRef as NativeIssueFieldRef, OrgType, ScrollType,
-    SimpleEntityRaw as NativeSimpleEntity, TrackerClient, TrackerConfig,
-    Transition as NativeTransition, UserProfile as NativeUserProfile,
+    IssueFieldRef as NativeIssueFieldRef, OrgType, ScrollType, SimpleEntityRaw as NativeSimpleEntity,
+    TrackerClient, TrackerConfig, Transition as NativeTransition, UserProfile as NativeUserProfile,
 };
 
 static DURATION_TOKEN_REGEX: Lazy<Regex> =
@@ -52,6 +53,16 @@ const MAX_TRAY_ISSUES: usize = 12;
 const ISSUE_REFRESH_INTERVAL_SECS: u64 = 300;
 const ISSUE_SCROLL_PER_PAGE: u32 = 100;
 const ISSUE_SCROLL_TTL_MILLIS: u64 = 60_000;
+
+fn default_filter_map() -> JsonMap<String, Value> {
+    let mut map = JsonMap::new();
+    map.insert("assignee".to_string(), Value::String("me()".to_string()));
+    map.insert(
+        "resolution".to_string(),
+        Value::String("empty()".to_string()),
+    );
+    map
+}
 
 #[derive(Debug, Serialize)]
 struct UpdateAvailablePayload {
@@ -163,8 +174,12 @@ async fn refresh_issue_cache(
     query: Option<String>,
 ) -> Result<Vec<bridge::Issue>, String> {
     println!("Refreshing issue cache...");
-    let q = query.unwrap_or_else(|| DEFAULT_ISSUE_QUERY.to_string());
-    let issues = match fetch_issues_native(&app, &q).await {
+    let params = if let Some(q) = query {
+        IssueSearchParams::new(Some(q), None)
+    } else {
+        IssueSearchParams::new(None, Some(default_filter_map()))
+    };
+    let issues = match fetch_issues_native(&app, &params).await {
         Ok(issues) => {
             println!("Successfully fetched {} issues", issues.len());
             issues
@@ -418,12 +433,14 @@ fn coerce_field_ref(field: Option<&NativeIssueFieldRef>) -> (String, String) {
 
 async fn fetch_issues_native(
     app: &tauri::AppHandle,
-    query: &str,
+    params: &IssueSearchParams,
 ) -> Result<Vec<bridge::Issue>, String> {
     let secrets = secrets_from_app(app)?;
     let client = build_tracker_client(&secrets)?;
+    let mut resolved_params = params.clone();
+    resolve_filter_shortcuts(&mut resolved_params, &client).await?;
     let response = client
-        .search_issues(query, None)
+        .search_issues(&resolved_params, None)
         .await
         .map_err(|err| err.to_string())?;
     Ok(convert_issues_native(response))
@@ -431,14 +448,16 @@ async fn fetch_issues_native(
 
 async fn fetch_issue_page_native(
     app: &tauri::AppHandle,
-    query: &str,
+    params: &IssueSearchParams,
     scroll_id: Option<&str>,
 ) -> Result<IssuePagePayload, String> {
     let secrets = secrets_from_app(app)?;
     let client = build_tracker_client(&secrets)?;
+    let mut resolved_params = params.clone();
+    resolve_filter_shortcuts(&mut resolved_params, &client).await?;
     let response = client
         .search_issues_scroll(
-            query,
+            &resolved_params,
             scroll_id,
             Some(ISSUE_SCROLL_PER_PAGE),
             ScrollType::Sorted,
@@ -512,6 +531,39 @@ async fn fetch_resolutions_native(
         .await
         .map_err(|err| err.to_string())?;
     Ok(convert_simple_entities_native(resolutions))
+}
+
+async fn fetch_queues_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let queues = client
+        .list_all_queues()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_simple_entities_native(queues))
+}
+
+async fn fetch_projects_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let projects = client
+        .list_all_projects()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_project_entities_native(projects))
+}
+
+async fn fetch_users_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::UserProfile>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let users = client
+        .list_all_users()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(users.into_iter().map(convert_user_profile).collect())
 }
 
 async fn release_scroll_context_native(
@@ -840,10 +892,42 @@ fn convert_simple_entities_native(entities: Vec<NativeSimpleEntity>) -> Vec<brid
         .collect()
 }
 
+fn convert_project_entities_native(entities: Vec<NativeSimpleEntity>) -> Vec<bridge::SimpleEntity> {
+    entities
+        .into_iter()
+        .map(convert_project_entity_native)
+        .collect()
+}
+
 fn convert_simple_entity_native(entity: NativeSimpleEntity) -> bridge::SimpleEntity {
     let key = entity
         .key
         .or(entity.id)
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let display = entity
+        .display
+        .as_ref()
+        .and_then(coerce_display_value)
+        .or_else(|| entity.name.as_ref().and_then(coerce_display_value))
+        .unwrap_or_else(|| key.clone());
+
+    bridge::SimpleEntity { key, display }
+}
+
+fn convert_project_entity_native(mut entity: NativeSimpleEntity) -> bridge::SimpleEntity {
+    let key = entity
+        .id
+        .take()
+        .or_else(|| entity.key.take())
         .and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -1018,13 +1102,45 @@ async fn get_issues(
     issue_store: tauri::State<'_, IssueStore>,
     timer: tauri::State<'_, Arc<Timer>>,
     query: Option<String>,
+    filter: Option<Value>,
     scroll_id: Option<String>,
 ) -> Result<IssuePagePayload, String> {
-    let q = query
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_ISSUE_QUERY.to_string());
+    let normalized_query = query.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
 
-    let page = fetch_issue_page_native(&app, &q, scroll_id.as_deref()).await?;
+    let filter_map = normalize_filter_map(filter);
+    let has_filter = filter_map.is_some();
+
+    let active_query = if let Some(query_value) = normalized_query {
+        Some(query_value)
+    } else if has_filter {
+        None
+    } else {
+        Some(DEFAULT_ISSUE_QUERY.to_string())
+    };
+
+    log_issue_fetch_start(
+        scroll_id.as_deref(),
+        active_query.as_deref(),
+        filter_map.as_ref(),
+    );
+
+    let search_params = IssueSearchParams::new(active_query, filter_map);
+
+    let page = fetch_issue_page_native(&app, &search_params, scroll_id.as_deref()).await?;
+
+    log_issue_fetch_result(
+        scroll_id.as_deref(),
+        page.issues.len(),
+        page.has_more,
+        page.next_scroll_id.as_deref(),
+    );
 
     if scroll_id.is_none() {
         issue_store.set(page.issues.clone());
@@ -1035,6 +1151,154 @@ async fn get_issues(
     }
 
     Ok(page)
+}
+
+fn normalize_filter_map(filter: Option<Value>) -> Option<JsonMap<String, Value>> {
+    filter.and_then(|value| match value {
+        Value::Object(map) if !map.is_empty() => Some(map),
+        _ => None,
+    })
+}
+
+fn describe_scroll_id(scroll_id: Option<&str>) -> String {
+    match scroll_id {
+        Some(id) if id.len() > 12 => format!("{}…", &id[..12]),
+        Some(id) => id.to_string(),
+        None => "root".to_string(),
+    }
+}
+
+fn serialize_filter(filter: &JsonMap<String, Value>) -> String {
+    Value::Object(filter.clone()).to_string()
+}
+
+fn log_issue_fetch_start(
+    scroll_id: Option<&str>,
+    query: Option<&str>,
+    filter: Option<&JsonMap<String, Value>>,
+) {
+    let scroll_repr = describe_scroll_id(scroll_id);
+    let query_repr = query.unwrap_or("∅");
+    let filter_repr = filter
+        .map(serialize_filter)
+        .unwrap_or_else(|| "null".to_string());
+    println!(
+        "[tracker:get_issues] scroll={} query={} filter={}",
+        scroll_repr, query_repr, filter_repr
+    );
+}
+
+fn log_issue_fetch_result(
+    scroll_id: Option<&str>,
+    count: usize,
+    has_more: bool,
+    next_scroll_id: Option<&str>,
+) {
+    println!(
+        "[tracker:get_issues] scroll={} -> {} issues (has_more={} next_scroll={})",
+        describe_scroll_id(scroll_id),
+        count,
+        has_more,
+        describe_scroll_id(next_scroll_id)
+    );
+}
+
+async fn resolve_filter_shortcuts(
+    params: &mut IssueSearchParams,
+    client: &TrackerClient,
+) -> Result<(), String> {
+    let filter = match params.filter.as_mut() {
+        Some(filter) => filter,
+        None => return Ok(()),
+    };
+
+    if let Some(value) = filter.get_mut("assignee") {
+        let mut cached_login: Option<String> = None;
+        rewrite_me_tokens(value, client, &mut cached_login).await?;
+    }
+
+    Ok(())
+}
+
+async fn rewrite_me_tokens(
+    value: &mut Value,
+    client: &TrackerClient,
+    cached_login: &mut Option<String>,
+) -> Result<(), String> {
+    match value {
+        Value::String(text) => {
+            if is_me_token(text) {
+                let login = ensure_current_login(client, cached_login).await?;
+                *text = login;
+            }
+        }
+        Value::Array(items) => {
+            let mut changed = false;
+            for item in items.iter_mut() {
+                if let Value::String(text) = item {
+                    if is_me_token(text) {
+                        let login = ensure_current_login(client, cached_login).await?;
+                        *text = login.clone();
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                dedupe_string_array(items);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn is_me_token(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("me()")
+}
+
+fn normalize_owned_string(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+async fn ensure_current_login(
+    client: &TrackerClient,
+    cached_login: &mut Option<String>,
+) -> Result<String, String> {
+    if let Some(login) = cached_login.clone() {
+        return Ok(login);
+    }
+
+    let profile = client
+        .get_myself()
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let login = normalize_owned_string(profile.login)
+        .or_else(|| normalize_owned_string(profile.email))
+        .ok_or_else(|| "Unable to determine current user login".to_string())?;
+
+    *cached_login = Some(login.clone());
+    Ok(login)
+}
+
+fn dedupe_string_array(items: &mut Vec<Value>) {
+    let mut seen = HashSet::new();
+    items.retain(|item| {
+        if let Value::String(text) = item {
+            if seen.contains(text) {
+                return false;
+            }
+            seen.insert(text.clone());
+        }
+        true
+    });
 }
 
 #[tauri::command]
@@ -1105,6 +1369,30 @@ async fn get_resolutions(
 ) -> Result<Vec<bridge::SimpleEntity>, String> {
     let secrets_clone = secrets.inner().clone();
     fetch_resolutions_native(secrets_clone).await
+}
+
+#[tauri::command]
+async fn get_queues(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_queues_native(secrets_clone).await
+}
+
+#[tauri::command]
+async fn get_projects(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_projects_native(secrets_clone).await
+}
+
+#[tauri::command]
+async fn get_users(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::UserProfile>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_users_native(secrets_clone).await
 }
 
 #[tauri::command]
@@ -1402,6 +1690,9 @@ pub fn run() {
             get_attachments,
             get_statuses,
             get_resolutions,
+            get_queues,
+            get_projects,
+            get_users,
             release_scroll_context,
             download_attachment,
             preview_attachment,
