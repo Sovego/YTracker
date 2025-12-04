@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 pub const DEFAULT_API_BASE: &str = "https://api.tracker.yandex.net";
-pub const DEFAULT_API_VERSION: &str = "v2";
+pub const DEFAULT_API_VERSION: &str = "v3";
 pub const DEFAULT_USER_AGENT: &str = "ytracker-tauri";
 pub const DEFAULT_COOLDOWN_MS: u64 = 500;
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;

@@ -23,26 +23,14 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
 
     const ensureCredentialsReady = () => {
         if (credentialsLoading) {
-            setStatusBanner({
-                variant: "error",
-                message: "OAuth credentials are still loading. Please wait a moment and try again.",
-            });
             return false;
         }
 
         if (!clientId) {
-            setStatusBanner({
-                variant: "error",
-                message: "OAuth client ID is not configured in this build. Please provide credentials via environment variables and rebuild.",
-            });
             return false;
         }
 
         if (!secretAvailable) {
-            setStatusBanner({
-                variant: "error",
-                message: "OAuth client secret is missing. Contact your administrator to configure credentials for this build.",
-            });
             return false;
         }
 
@@ -100,7 +88,6 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
                     <div className="p-4 border border-slate-200 dark:border-slate-800 rounded-lg bg-slate-50/60 dark:bg-slate-900/30">
                         <div className="flex flex-col gap-2">
                             <div className="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-slate-200">
-                                OAuth App Credentials
                                 {!credentialsReady && (
                                     <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-100">
                                         <ShieldAlert className="w-3.5 h-3.5" />
@@ -108,14 +95,6 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
                                     </span>
                                 )}
                             </div>
-                            <p className="text-sm text-slate-600 dark:text-slate-400">
-                                These credentials are securely embedded into this build. No manual input is required.
-                            </p>
-                            {clientId && (
-                                <p className="text-xs font-mono text-slate-500 dark:text-slate-400 break-all">
-                                    Client ID: {clientId}
-                                </p>
-                            )}
                             {!credentialsReady && (
                                 <p className="text-xs text-amber-700 dark:text-amber-200 flex items-center gap-2">
                                     <ShieldAlert className="w-4 h-4" /> OAuth secrets are missing. Please configure ENV variables before building.
@@ -185,7 +164,7 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
                         </div>
                         <div>
                             <label htmlFor="orgId" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                                Org ID (Optional)
+                                Org ID
                             </label>
                             <input
                                 id="orgId"
