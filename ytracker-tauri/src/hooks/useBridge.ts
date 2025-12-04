@@ -237,7 +237,7 @@ const requestIssuePage = async (options?: IssueSearchOptions, scrollId?: string 
         const promise = invoke<IssuePageResponse>("get_issues", {
             query: options?.query ?? null,
             filter: options?.filter ?? null,
-            scrollId: scrollId ?? null,
+            scroll_id: scrollId ?? null,
         })
             .then(normalizeIssuePage)
             .finally(() => {
@@ -516,7 +516,7 @@ export function useTracker() {
             return;
         }
         nextScrollIdRef.current = null;
-        void invoke("release_scroll_context", { scrollId: scrollId }).catch((err) => {
+        void invoke("release_scroll_context", { scroll_id: scrollId }).catch((err) => {
             console.warn("Failed to release scroll context", err);
         });
     }, []);
