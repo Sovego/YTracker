@@ -72,6 +72,12 @@ struct UpdateAvailablePayload {
     automatic: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct TimerStoppedPayload {
+    issue_key: String,
+    elapsed: u64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 struct IssuePagePayload {
     issues: Vec<bridge::Issue>,
@@ -154,6 +160,17 @@ fn notify_timer_stopped(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
 
     if let Err(err) = app.notification().builder().title(title).body(body).show() {
         eprintln!("Failed to show stop notification: {}", err);
+    }
+}
+
+fn emit_timer_stopped_event(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
+    let payload = TimerStoppedPayload {
+        issue_key: issue_key.to_string(),
+        elapsed,
+    };
+
+    if let Err(err) = app.emit("timer-stopped", &payload) {
+        eprintln!("Failed to emit timer-stopped event: {}", err);
     }
 }
 
@@ -335,11 +352,9 @@ async fn logout(
         .clear_session()
         .map_err(|err| format!("Failed to clear session: {}", err))?;
 
+    let _ = timer.stop();
     issue_store.set(Vec::new());
-    let timer_state = timer.get_state();
-    if let Err(err) = update_tray_menu(&app, &[], &timer_state) {
-        eprintln!("Failed to clear tray issues after logout: {}", err);
-    }
+    broadcast_timer_state(&app, &timer, issue_store.inner());
 
     Ok(())
 }
@@ -1603,6 +1618,11 @@ pub fn run() {
                         let (elapsed, maybe_key) = tray_timer.stop();
                         broadcast_timer_state(app, &tray_timer, &tray_issue_store);
                         if let Some(issue_key) = maybe_key.as_deref() {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                            emit_timer_stopped_event(app, issue_key, elapsed);
                             notify_timer_stopped(app, issue_key, elapsed);
                         }
                     }

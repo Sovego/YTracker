@@ -18,11 +18,17 @@ import { useMediaQuery } from "./hooks/useMediaQuery";
 import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { message } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 import { FilterSelect, type FilterOption } from "./components/FilterSelect";
 
 const BASE_RESOLUTION_FILTER = "empty()";
 const SELF_ASSIGNEE_VALUE = "me()";
+
+type TimerStoppedPayload = {
+  issue_key: string;
+  elapsed: number;
+};
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
@@ -318,10 +324,31 @@ function App() {
     void fetchIssues(activeSearchOptions ?? searchOptions);
   }, [fetchIssues, activeSearchOptions, searchOptions]);
 
-  const openWorkLogDialog = (key: string, elapsed: number, restartTarget?: { key: string; summary: string }) => {
+  const openWorkLogDialog = useCallback((key: string, elapsed: number, restartTarget?: { key: string; summary: string }) => {
     setWorkLogData({ key, elapsed });
     setPendingRestart(restartTarget ?? null);
-  };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<TimerStoppedPayload>("timer-stopped", (event) => {
+      if (!isAuthenticated) {
+        return;
+      }
+
+      const payload = event.payload;
+      if (!payload.issue_key || payload.elapsed <= 0) {
+        return;
+      }
+
+      openWorkLogDialog(payload.issue_key, payload.elapsed);
+    });
+
+    return () => {
+      unlisten.then((dispose) => dispose()).catch((err) => {
+        console.warn("Failed to dispose timer-stopped listener", err);
+      });
+    };
+  }, [isAuthenticated, openWorkLogDialog]);
 
   const dismissWorkLogDialog = () => {
     setWorkLogData(null);
