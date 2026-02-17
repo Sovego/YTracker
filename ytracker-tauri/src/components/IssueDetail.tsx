@@ -191,8 +191,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         setLoadingDetails(true);
         try {
             const [detail, c, a, t] = await Promise.all([
-                getIssue(key).catch((err) => {
-                    console.error("Failed to fetch issue detail", err);
+                getIssue(key).catch(() => {
+                    console.error("Failed to fetch issue detail");
                     return null;
                 }),
                 getComments(key),
@@ -210,8 +210,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setComments(c);
             setAttachments(a);
             setTransitions(t);
-        } catch (e) {
-            console.error("Failed to load details", e);
+        } catch {
+            console.error("Failed to load details");
             if (issue && issue.key === key) {
                 setComments([]);
                 setAttachments([]);
@@ -230,8 +230,12 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setIsEditing(false);
             closeStatusMenu();
             // Load details asynchronously without blocking render
-            loadDetails(issue.key).catch(console.error);
-            getResolutions().then(setResolutions).catch(console.error);
+            loadDetails(issue.key).catch(() => {
+                console.error("Failed to load issue details");
+            });
+            getResolutions().then(setResolutions).catch(() => {
+                console.error("Failed to load resolutions");
+            });
         } else {
             setIssueDetails(null);
             setComments([]);
@@ -288,8 +292,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             await updateIssue(activeIssue.key, editSummary, editDescription);
             setIsEditing(false);
             onIssueUpdate(); // Refresh parent
-        } catch (e) {
-            console.error("Failed to update issue", e);
+        } catch {
+            console.error("Failed to update issue");
             alert("Failed to update issue");
         }
     };
@@ -301,8 +305,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setNewComment("");
             const c = await getComments(activeIssue.key);
             setComments(c);
-        } catch (e) {
-            console.error("Failed to add comment", e);
+        } catch {
+            console.error("Failed to add comment");
             alert("Failed to add comment");
         }
     };
@@ -333,8 +337,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             onIssueUpdate();
             loadDetails(activeIssue.key);
             setTransitionDialog(prev => ({ ...prev, isOpen: false }));
-        } catch (e) {
-            console.error("Failed to transition", e);
+        } catch {
+            console.error("Failed to transition");
             alert("Failed to transition");
         }
     };
@@ -388,7 +392,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                         try {
                             return await previewAttachment(activeIssue.key, attachmentId);
                         } catch (fallbackError) {
-                            console.error("Fallback attachment preview failed", fallbackError);
+                            console.error("Fallback attachment preview failed");
                             throw fallbackError;
                         }
                     }
@@ -409,7 +413,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                 }));
             })
             .catch(err => {
-                console.error(`Failed to load inline image ${source}`, err);
+                console.error("Failed to load inline image");
                 setInlineImages(prev => ({
                     ...prev,
                     [source]: {
@@ -446,8 +450,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                 attachment: att,
                 dataUrl: `data:${preview.mime_type};base64,${preview.data_base64}`,
             });
-        } catch (e) {
-            console.error("Failed to preview attachment", e);
+        } catch {
+            console.error("Failed to preview attachment");
             setPreviewError("Failed to load preview. Please try downloading instead.");
         } finally {
             setPreviewLoadingId(null);

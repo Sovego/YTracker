@@ -70,8 +70,8 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
         setSavingInterval(true);
         try {
             await save({ ...config, timer_notification_interval: value });
-        } catch (err) {
-            console.error("Failed to save settings", err);
+        } catch {
+            console.error("Failed to save settings");
             setIntervalError("Unable to save timer interval. Please try again.");
             setInterval(config.timer_notification_interval);
         } finally {
@@ -87,7 +87,7 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
             onLogout();
             onClose();
         } catch (err) {
-            console.error("Failed to logout", err);
+            console.error("Failed to logout");
             setLogoutError(String(err));
         } finally {
             setLogoutLoading(false);

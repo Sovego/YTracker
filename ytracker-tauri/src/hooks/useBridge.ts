@@ -516,8 +516,8 @@ export function useTracker() {
             return;
         }
         nextScrollIdRef.current = null;
-        void invoke("release_scroll_context", { scroll_id: scrollId }).catch((err) => {
-            console.warn("Failed to release scroll context", err);
+        void invoke("release_scroll_context", { scroll_id: scrollId }).catch(() => {
+            console.warn("Failed to release scroll context");
         });
     }, []);
 
@@ -723,8 +723,8 @@ export function useClientCredentials() {
 export const checkSessionExists = async (): Promise<boolean> => {
     try {
         return await invoke<boolean>("has_session");
-    } catch (err) {
-        console.warn("Session check failed", err);
+    } catch {
+        console.warn("Session check failed");
         return false;
     }
 };
@@ -738,8 +738,8 @@ export function useConfig() {
             .then((data) => {
                 if (!cancelled) setConfig(data);
             })
-            .catch((err) => {
-                console.warn("Failed to load config", err);
+            .catch(() => {
+                console.warn("Failed to load config");
             });
         return () => {
             cancelled = true;

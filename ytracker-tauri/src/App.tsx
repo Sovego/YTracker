@@ -186,8 +186,8 @@ function App() {
             setActiveSearchOptions(initialSearchOptionsRef.current);
           }
         }
-      } catch (err) {
-        console.warn("Initial issue load failed", err);
+      } catch {
+        console.warn("Initial issue load failed");
         if (!cancelled) {
           setIsAuthenticated(false);
         }
@@ -264,9 +264,9 @@ function App() {
         if (!granted) {
           console.warn("Notifications are disabled; timer reminders will be muted.");
         }
-      } catch (err) {
+      } catch {
         if (!cancelled) {
-          console.warn("Unable to check notification permission", err);
+          console.warn("Unable to check notification permission");
         }
       }
     };
@@ -344,8 +344,8 @@ function App() {
     });
 
     return () => {
-      unlisten.then((dispose) => dispose()).catch((err) => {
-        console.warn("Failed to dispose timer-stopped listener", err);
+      unlisten.then((dispose) => dispose()).catch(() => {
+        console.warn("Failed to dispose timer-stopped listener");
       });
     };
   }, [isAuthenticated, openWorkLogDialog]);
@@ -353,8 +353,8 @@ function App() {
   const dismissWorkLogDialog = () => {
     setWorkLogData(null);
     if (pendingRestart) {
-      void invokeStartTimer(pendingRestart.key, pendingRestart.summary).catch((err) => {
-        console.error("Failed to restart timer after logging", err);
+      void invokeStartTimer(pendingRestart.key, pendingRestart.summary).catch(() => {
+        console.error("Failed to restart timer after logging");
       });
       setPendingRestart(null);
     }
@@ -412,8 +412,8 @@ function App() {
 
         // If closed without a response, treat as cancel
         return;
-      } catch (err) {
-        console.error("Timer conflict dialog failed", err);
+      } catch {
+        console.error("Timer conflict dialog failed");
         // As a fallback, do nothing to avoid losing data
         return;
       }
