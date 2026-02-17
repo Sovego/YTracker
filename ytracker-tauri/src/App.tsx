@@ -619,7 +619,7 @@ function App() {
           </aside>
 
           {/* Main Content */}
-          <main className={`flex-1 relative bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 ${showDetailOverlay ? "overflow-hidden" : "overflow-auto lg:overflow-hidden"}`}>
+          <main className={`${isNarrowLayout && !selectedIssue ? "hidden lg:block" : "flex-1"} relative bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 ${showDetailOverlay ? "overflow-hidden" : "overflow-auto lg:overflow-hidden"}`}>
             {showDetailPlaceholder ? (
               <IssueDetailPlaceholder />
             ) : (!isNarrowLayout || !selectedIssue) && (
