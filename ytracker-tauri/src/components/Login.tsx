@@ -20,6 +20,9 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
     const clientId = credentialsInfo?.client_id ?? "";
     const secretAvailable = Boolean(credentialsInfo?.has_client_secret);
     const credentialsReady = Boolean(clientId && secretAvailable);
+    const credentialsResolved = !credentialsLoading;
+    const showMissingCredentialsWarning =
+        credentialsResolved && !credentialsError && Boolean(credentialsInfo) && !credentialsReady;
 
     const ensureCredentialsReady = () => {
         if (credentialsLoading) {
@@ -88,14 +91,14 @@ export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
                     <div className="p-4 border border-slate-200 dark:border-slate-800 rounded-lg bg-slate-50/60 dark:bg-slate-900/30">
                         <div className="flex flex-col gap-2">
                             <div className="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-slate-200">
-                                {!credentialsReady && (
+                                {showMissingCredentialsWarning && (
                                     <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-100">
                                         <ShieldAlert className="w-3.5 h-3.5" />
                                         Attention
                                     </span>
                                 )}
                             </div>
-                            {!credentialsReady && (
+                            {showMissingCredentialsWarning && (
                                 <p className="text-xs text-amber-700 dark:text-amber-200 flex items-center gap-2">
                                     <ShieldAlert className="w-4 h-4" /> OAuth secrets are missing. Please configure ENV variables before building.
                                 </p>

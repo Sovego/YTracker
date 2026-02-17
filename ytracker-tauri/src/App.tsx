@@ -25,9 +25,18 @@ const BASE_RESOLUTION_FILTER = "empty()";
 const SELF_ASSIGNEE_VALUE = "me()";
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
+  const [authChecked, setAuthChecked] = useState(false);
   const { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore } = useTracker();
   const { state: timerState, start: invokeStartTimer, stop: invokeStopTimer } = useTimer();
-  const { queues, projects, users, loading: catalogsLoading, error: catalogsError } = useFilterCatalogs();
+  const {
+    queues,
+    projects,
+    users,
+    loading: catalogsLoading,
+    error: catalogsError,
+    refresh: refreshCatalogs,
+  } = useFilterCatalogs(authChecked && isAuthenticated);
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
   const [assigneeFilters, setAssigneeFilters] = useState<string[]>([SELF_ASSIGNEE_VALUE]);
   const [queueFilters, setQueueFilters] = useState<string[]>([]);
@@ -36,7 +45,6 @@ function App() {
   const [activeSearchOptions, setActiveSearchOptions] = useState<IssueSearchOptions | undefined>({
     filter: { assignee: SELF_ASSIGNEE_VALUE, resolution: BASE_RESOLUTION_FILTER },
   });
-  const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
   const [workLogData, setWorkLogData] = useState<{ key: string, elapsed: number } | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -179,6 +187,7 @@ function App() {
         }
       } finally {
         if (!cancelled) {
+          setAuthChecked(true);
           setInitialLoadDone(true);
         }
       }
@@ -265,7 +274,18 @@ function App() {
 
   // If we have a specific auth error, we should probably set isAuthenticated(false)
   useEffect(() => {
-    if (error && (error.toLowerCase().includes("auth") || error.toLowerCase().includes("token"))) {
+    if (!error) {
+      return;
+    }
+
+    const normalizedError = error.toLowerCase();
+    if (
+      normalizedError.includes("auth") ||
+      normalizedError.includes("token") ||
+      normalizedError.includes("unauthorized") ||
+      normalizedError.includes("not authenticated") ||
+      normalizedError.includes("sign in again")
+    ) {
       setIsAuthenticated(false);
     }
   }, [error]);
@@ -285,8 +305,12 @@ function App() {
 
   const handleLoginSuccess = () => {
     setIsAuthenticated(true);
+    setAuthChecked(true);
     setActiveSearchOptions(searchOptions);
     setTextFilter("");
+    void refreshCatalogs(true).catch(() => {
+      // Login flow still proceeds; catalog error is already handled in hook state/UI.
+    });
     void fetchIssues(searchOptions);
   };
 

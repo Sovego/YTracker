@@ -325,10 +325,23 @@ async fn get_current_user(
 }
 
 #[tauri::command]
-async fn logout(secrets: tauri::State<'_, SecretsManager>) -> Result<(), String> {
+async fn logout(
+    app: tauri::AppHandle,
+    secrets: tauri::State<'_, SecretsManager>,
+    issue_store: tauri::State<'_, IssueStore>,
+    timer: tauri::State<'_, Arc<Timer>>,
+) -> Result<(), String> {
     secrets
         .clear_session()
-        .map_err(|err| format!("Failed to clear session: {}", err))
+        .map_err(|err| format!("Failed to clear session: {}", err))?;
+
+    issue_store.set(Vec::new());
+    let timer_state = timer.get_state();
+    if let Err(err) = update_tray_menu(&app, &[], &timer_state) {
+        eprintln!("Failed to clear tray issues after logout: {}", err);
+    }
+
+    Ok(())
 }
 
 async fn get_current_user_native(secrets: &SecretsManager) -> Result<bridge::UserProfile, String> {
@@ -385,6 +398,15 @@ fn secrets_from_app(app: &tauri::AppHandle) -> Result<SecretsManager, String> {
     app.try_state::<SecretsManager>()
         .map(|state| state.inner().clone())
         .ok_or_else(|| "Secrets manager is not initialized".to_string())
+}
+
+async fn has_session_from_app(app: &tauri::AppHandle) -> Result<bool, String> {
+    let manager = secrets_from_app(app)?;
+    let has_session = task::spawn_blocking(move || manager.get_session())
+        .await
+        .map_err(|err| format!("Failed to check session: {}", err))??
+        .is_some();
+    Ok(has_session)
 }
 
 fn convert_issues_native(issues: Vec<NativeIssue>) -> Vec<bridge::Issue> {
@@ -1607,15 +1629,23 @@ pub fn run() {
             let refresh_timer = timer_for_refresh_loop.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    if let Err(err) = refresh_issue_cache(
-                        refresh_app_handle.clone(),
-                        refresh_issue_store.clone(),
-                        refresh_timer.clone(),
-                        None,
-                    )
-                    .await
-                    {
-                        eprintln!("Background issue refresh failed: {}", err);
+                    match has_session_from_app(&refresh_app_handle).await {
+                        Ok(true) => {
+                            if let Err(err) = refresh_issue_cache(
+                                refresh_app_handle.clone(),
+                                refresh_issue_store.clone(),
+                                refresh_timer.clone(),
+                                None,
+                            )
+                            .await
+                            {
+                                eprintln!("Background issue refresh failed: {}", err);
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            eprintln!("Background issue refresh skipped: {}", err);
+                        }
                     }
                     sleep(std::time::Duration::from_secs(ISSUE_REFRESH_INTERVAL_SECS)).await;
                 }
