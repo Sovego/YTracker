@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getErrorSummary } from "../utils";
 
 export interface Issue {
     key: string;
@@ -517,7 +518,7 @@ export function useTracker() {
         }
         nextScrollIdRef.current = null;
         void invoke("release_scroll_context", { scroll_id: scrollId }).catch((err) => {
-            console.warn("Failed to release scroll context", err);
+            console.warn(`Failed to release scroll context (${getErrorSummary(err)})`);
         });
     }, []);
 
@@ -583,12 +584,12 @@ export function useTracker() {
     return { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore };
 }
 
-export function useFilterCatalogs() {
+export function useFilterCatalogs(enabled = true) {
     const [queues, setQueues] = useState<SimpleEntity[]>(cachedQueuesDirectory ?? []);
     const [projects, setProjects] = useState<SimpleEntity[]>(cachedProjectsDirectory ?? []);
     const [users, setUsers] = useState<UserProfile[]>(cachedUsersDirectory ?? []);
     const [loading, setLoading] = useState(
-        !cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory
+        enabled && (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory)
     );
     const [error, setError] = useState<string | null>(null);
 
@@ -615,12 +616,20 @@ export function useFilterCatalogs() {
     }, []);
 
     useEffect(() => {
+        if (!enabled) {
+            setLoading(false);
+            setError(null);
+            return;
+        }
+
         if (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory) {
+            setError(null);
             void refresh();
         } else {
             setLoading(false);
+            setError(null);
         }
-    }, [refresh]);
+    }, [enabled, refresh]);
 
     return { queues, projects, users, loading, error, refresh };
 }
@@ -686,7 +695,7 @@ export function useWorkLog() {
 
 export function useClientCredentials() {
     const [info, setInfo] = useState<ClientCredentialsInfo | null>(null);
-    const [loading, setLoading] = useState(false);
+    const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     const refresh = useCallback(async () => {
@@ -716,7 +725,7 @@ export const checkSessionExists = async (): Promise<boolean> => {
     try {
         return await invoke<boolean>("has_session");
     } catch (err) {
-        console.warn("Session check failed", err);
+        console.warn(`Session check failed (${getErrorSummary(err)})`);
         return false;
     }
 };
@@ -731,7 +740,7 @@ export function useConfig() {
                 if (!cancelled) setConfig(data);
             })
             .catch((err) => {
-                console.warn("Failed to load config", err);
+                console.warn(`Failed to load config (${getErrorSummary(err)})`);
             });
         return () => {
             cancelled = true;

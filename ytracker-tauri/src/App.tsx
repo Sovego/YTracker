@@ -18,16 +18,32 @@ import { useMediaQuery } from "./hooks/useMediaQuery";
 import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { message } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 import { FilterSelect, type FilterOption } from "./components/FilterSelect";
+import { getErrorSummary } from "./utils";
 
 const BASE_RESOLUTION_FILTER = "empty()";
 const SELF_ASSIGNEE_VALUE = "me()";
 
+type TimerStoppedPayload = {
+  issue_key: string;
+  elapsed: number;
+};
+
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
+  const [authChecked, setAuthChecked] = useState(false);
   const { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore } = useTracker();
   const { state: timerState, start: invokeStartTimer, stop: invokeStopTimer } = useTimer();
-  const { queues, projects, users, loading: catalogsLoading, error: catalogsError } = useFilterCatalogs();
+  const {
+    queues,
+    projects,
+    users,
+    loading: catalogsLoading,
+    error: catalogsError,
+    refresh: refreshCatalogs,
+  } = useFilterCatalogs(authChecked && isAuthenticated);
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
   const [assigneeFilters, setAssigneeFilters] = useState<string[]>([SELF_ASSIGNEE_VALUE]);
   const [queueFilters, setQueueFilters] = useState<string[]>([]);
@@ -36,7 +52,6 @@ function App() {
   const [activeSearchOptions, setActiveSearchOptions] = useState<IssueSearchOptions | undefined>({
     filter: { assignee: SELF_ASSIGNEE_VALUE, resolution: BASE_RESOLUTION_FILTER },
   });
-  const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
   const [workLogData, setWorkLogData] = useState<{ key: string, elapsed: number } | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -173,12 +188,13 @@ function App() {
           }
         }
       } catch (err) {
-        console.warn("Initial issue load failed", err);
+        console.warn(`Initial issue load failed (${getErrorSummary(err)})`);
         if (!cancelled) {
           setIsAuthenticated(false);
         }
       } finally {
         if (!cancelled) {
+          setAuthChecked(true);
           setInitialLoadDone(true);
         }
       }
@@ -251,7 +267,7 @@ function App() {
         }
       } catch (err) {
         if (!cancelled) {
-          console.warn("Unable to check notification permission", err);
+          console.warn(`Unable to check notification permission (${getErrorSummary(err)})`);
         }
       }
     };
@@ -265,7 +281,18 @@ function App() {
 
   // If we have a specific auth error, we should probably set isAuthenticated(false)
   useEffect(() => {
-    if (error && (error.toLowerCase().includes("auth") || error.toLowerCase().includes("token"))) {
+    if (!error) {
+      return;
+    }
+
+    const normalizedError = error.toLowerCase();
+    if (
+      normalizedError.includes("auth") ||
+      normalizedError.includes("token") ||
+      normalizedError.includes("unauthorized") ||
+      normalizedError.includes("not authenticated") ||
+      normalizedError.includes("sign in again")
+    ) {
       setIsAuthenticated(false);
     }
   }, [error]);
@@ -285,8 +312,13 @@ function App() {
 
   const handleLoginSuccess = () => {
     setIsAuthenticated(true);
+    setAuthChecked(true);
     setActiveSearchOptions(searchOptions);
     setTextFilter("");
+    void refreshCatalogs().catch((err) => {
+      console.warn(`Catalog refresh after login failed (${getErrorSummary(err)})`);
+      // Login flow still proceeds; catalog error is already handled in hook state/UI.
+    });
     void fetchIssues(searchOptions);
   };
 
@@ -294,16 +326,37 @@ function App() {
     void fetchIssues(activeSearchOptions ?? searchOptions);
   }, [fetchIssues, activeSearchOptions, searchOptions]);
 
-  const openWorkLogDialog = (key: string, elapsed: number, restartTarget?: { key: string; summary: string }) => {
+  const openWorkLogDialog = useCallback((key: string, elapsed: number, restartTarget?: { key: string; summary: string }) => {
     setWorkLogData({ key, elapsed });
     setPendingRestart(restartTarget ?? null);
-  };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<TimerStoppedPayload>("timer-stopped", (event) => {
+      if (!isAuthenticated) {
+        return;
+      }
+
+      const payload = event.payload;
+      if (!payload.issue_key || payload.elapsed <= 0) {
+        return;
+      }
+
+      openWorkLogDialog(payload.issue_key, payload.elapsed);
+    });
+
+    return () => {
+      unlisten.then((dispose) => dispose()).catch((err) => {
+        console.warn(`Failed to dispose timer-stopped listener (${getErrorSummary(err)})`);
+      });
+    };
+  }, [isAuthenticated, openWorkLogDialog]);
 
   const dismissWorkLogDialog = () => {
     setWorkLogData(null);
     if (pendingRestart) {
       void invokeStartTimer(pendingRestart.key, pendingRestart.summary).catch((err) => {
-        console.error("Failed to restart timer after logging", err);
+        console.error(`Failed to restart timer after logging (${getErrorSummary(err)})`);
       });
       setPendingRestart(null);
     }
@@ -362,7 +415,7 @@ function App() {
         // If closed without a response, treat as cancel
         return;
       } catch (err) {
-        console.error("Timer conflict dialog failed", err);
+        console.error(`Timer conflict dialog failed (${getErrorSummary(err)})`);
         // As a fallback, do nothing to avoid losing data
         return;
       }
@@ -568,7 +621,7 @@ function App() {
           </aside>
 
           {/* Main Content */}
-          <main className={`flex-1 relative bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 ${showDetailOverlay ? "overflow-hidden" : "overflow-auto lg:overflow-hidden"}`}>
+          <main className={`${isNarrowLayout && !selectedIssue ? "hidden lg:block" : "flex-1"} relative bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 ${showDetailOverlay ? "overflow-hidden" : "overflow-auto lg:overflow-hidden"}`}>
             {showDetailPlaceholder ? (
               <IssueDetailPlaceholder />
             ) : (!isNarrowLayout || !selectedIssue) && (

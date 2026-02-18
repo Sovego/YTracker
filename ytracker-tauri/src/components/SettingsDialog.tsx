@@ -3,6 +3,7 @@ import { LogOut, X, Clock, Loader2, Shield, UserRound, RefreshCcw, DownloadCloud
 import clsx from "clsx";
 import { useAccount, useConfig, useUpdater } from "../hooks/useBridge";
 import { SettingsCardSkeleton } from "./Loaders";
+import { getErrorSummary } from "../utils";
 
 interface SettingsDialogProps {
     onClose: () => void;
@@ -71,7 +72,7 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
         try {
             await save({ ...config, timer_notification_interval: value });
         } catch (err) {
-            console.error("Failed to save settings", err);
+            console.error(`Failed to save settings (${getErrorSummary(err)})`);
             setIntervalError("Unable to save timer interval. Please try again.");
             setInterval(config.timer_notification_interval);
         } finally {
@@ -87,7 +88,7 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
             onLogout();
             onClose();
         } catch (err) {
-            console.error("Failed to logout", err);
+            console.error(`Failed to logout (${getErrorSummary(err)})`);
             setLogoutError(String(err));
         } finally {
             setLogoutLoading(false);

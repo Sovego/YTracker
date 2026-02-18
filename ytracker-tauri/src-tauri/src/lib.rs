@@ -2,6 +2,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::Utc;
 use directories::UserDirs;
+use log::{debug, info, warn};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::Serialize;
@@ -72,6 +73,12 @@ struct UpdateAvailablePayload {
     automatic: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct TimerStoppedPayload {
+    issue_key: String,
+    elapsed: u64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 struct IssuePagePayload {
     issues: Vec<bridge::Issue>,
@@ -105,6 +112,38 @@ fn truncate_text(value: &str, limit: usize) -> String {
     let mut truncated: String = trimmed.chars().take(limit - 1).collect();
     truncated.push('…');
     truncated
+}
+
+fn redact_log_details(value: &str) -> String {
+    let collapsed = collapse_whitespace(value);
+    let category = collapsed
+        .split(':')
+        .next()
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or("error");
+    let lowered = collapsed.to_lowercase();
+    let has_sensitive_hint = [
+        "token",
+        "authorization",
+        "bearer",
+        "oauth",
+        "client_secret",
+        "password",
+        "code=",
+        "set-cookie",
+    ]
+    .iter()
+    .any(|hint| lowered.contains(hint));
+
+    if has_sensitive_hint {
+        return format!(
+            "{}: <redacted-sensitive-details>",
+            truncate_text(category, 64)
+        );
+    }
+
+    truncate_text(&collapsed, 180)
 }
 
 fn format_issue_label(issue: &bridge::Issue) -> String {
@@ -144,7 +183,7 @@ fn notify_timer_started(app: &tauri::AppHandle, issue_key: &str, summary: Option
         .unwrap_or_else(|| "Tracking time from tray".to_string());
 
     if let Err(err) = app.notification().builder().title(title).body(body).show() {
-        eprintln!("Failed to show start notification: {}", err);
+        warn!("Failed to show start notification: {}", err);
     }
 }
 
@@ -153,17 +192,28 @@ fn notify_timer_stopped(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
     let body = format!("Tracked {}", format_elapsed(elapsed));
 
     if let Err(err) = app.notification().builder().title(title).body(body).show() {
-        eprintln!("Failed to show stop notification: {}", err);
+        warn!("Failed to show stop notification: {}", err);
+    }
+}
+
+fn emit_timer_stopped_event(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
+    let payload = TimerStoppedPayload {
+        issue_key: issue_key.to_string(),
+        elapsed,
+    };
+
+    if let Err(err) = app.emit("timer-stopped", &payload) {
+        warn!("Failed to emit timer-stopped event: {}", err);
     }
 }
 
 fn broadcast_timer_state(app: &tauri::AppHandle, timer: &Arc<Timer>, issue_store: &IssueStore) {
     let snapshot = timer.get_state();
     if let Err(err) = app.emit("timer-tick", &snapshot) {
-        eprintln!("Failed to emit timer tick: {}", err);
+        warn!("Failed to emit timer tick: {}", err);
     }
     if let Err(err) = update_tray_menu(app, &issue_store.snapshot(), &snapshot) {
-        eprintln!("Failed to update tray state: {}", err);
+        warn!("Failed to update tray state: {}", err);
     }
 }
 
@@ -173,7 +223,7 @@ async fn refresh_issue_cache(
     timer: Arc<Timer>,
     query: Option<String>,
 ) -> Result<Vec<bridge::Issue>, String> {
-    println!("Refreshing issue cache...");
+    debug!("Refreshing issue cache");
     let params = if let Some(q) = query {
         IssueSearchParams::new(Some(q), None)
     } else {
@@ -181,18 +231,19 @@ async fn refresh_issue_cache(
     };
     let issues = match fetch_issues_native(&app, &params).await {
         Ok(issues) => {
-            println!("Successfully fetched {} issues", issues.len());
+            debug!("Issue cache refreshed");
             issues
         }
         Err(e) => {
-            println!("Failed to fetch issues: {}", e);
+            warn!("Failed to refresh issue cache");
+            debug!("Issue cache refresh details: {}", redact_log_details(&e));
             return Err(e);
         }
     };
     issue_store.set(issues.clone());
     let state = timer.get_state();
     if let Err(err) = update_tray_menu(&app, &issues, &state) {
-        eprintln!("Failed to update tray state: {}", err);
+        warn!("Failed to update tray state: {}", err);
     }
     Ok(issues)
 }
@@ -294,7 +345,7 @@ fn update_tray_menu<R: Runtime>(
         };
 
         if let Err(err) = tray.set_title(Some(&title)) {
-            eprintln!("Failed to set tray title: {}", err);
+            debug!("Failed to set tray title: {}", err);
         }
     }
 
@@ -325,10 +376,21 @@ async fn get_current_user(
 }
 
 #[tauri::command]
-async fn logout(secrets: tauri::State<'_, SecretsManager>) -> Result<(), String> {
+async fn logout(
+    app: tauri::AppHandle,
+    secrets: tauri::State<'_, SecretsManager>,
+    issue_store: tauri::State<'_, IssueStore>,
+    timer: tauri::State<'_, Arc<Timer>>,
+) -> Result<(), String> {
     secrets
         .clear_session()
-        .map_err(|err| format!("Failed to clear session: {}", err))
+        .map_err(|err| format!("Failed to clear session: {}", err))?;
+
+    let _ = timer.stop();
+    issue_store.set(Vec::new());
+    broadcast_timer_state(&app, &timer, issue_store.inner());
+
+    Ok(())
 }
 
 async fn get_current_user_native(secrets: &SecretsManager) -> Result<bridge::UserProfile, String> {
@@ -385,6 +447,15 @@ fn secrets_from_app(app: &tauri::AppHandle) -> Result<SecretsManager, String> {
     app.try_state::<SecretsManager>()
         .map(|state| state.inner().clone())
         .ok_or_else(|| "Secrets manager is not initialized".to_string())
+}
+
+async fn has_session_from_app(app: &tauri::AppHandle) -> Result<bool, String> {
+    let manager = secrets_from_app(app)?;
+    let has_session = task::spawn_blocking(move || manager.get_session())
+        .await
+        .map_err(|err| format!("Failed to check session: {}", err))??
+        .is_some();
+    Ok(has_session)
 }
 
 fn convert_issues_native(issues: Vec<NativeIssue>) -> Vec<bridge::Issue> {
@@ -1137,7 +1208,6 @@ async fn get_issues(
 
     log_issue_fetch_result(
         scroll_id.as_deref(),
-        page.issues.len(),
         page.has_more,
         page.next_scroll_id.as_deref(),
     );
@@ -1146,7 +1216,7 @@ async fn get_issues(
         issue_store.set(page.issues.clone());
         let state = timer.get_state();
         if let Err(err) = update_tray_menu(&app, &page.issues, &state) {
-            eprintln!("Failed to update tray state: {}", err);
+            warn!("Failed to update tray state: {}", err);
         }
     }
 
@@ -1168,36 +1238,32 @@ fn describe_scroll_id(scroll_id: Option<&str>) -> String {
     }
 }
 
-fn serialize_filter(filter: &JsonMap<String, Value>) -> String {
-    Value::Object(filter.clone()).to_string()
-}
-
 fn log_issue_fetch_start(
     scroll_id: Option<&str>,
     query: Option<&str>,
     filter: Option<&JsonMap<String, Value>>,
 ) {
     let scroll_repr = describe_scroll_id(scroll_id);
-    let query_repr = query.unwrap_or("∅");
-    let filter_repr = filter
-        .map(serialize_filter)
-        .unwrap_or_else(|| "null".to_string());
-    println!(
-        "[tracker:get_issues] scroll={} query={} filter={}",
-        scroll_repr, query_repr, filter_repr
+    let has_query = query
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let filter_keys = filter.map(|map| map.len()).unwrap_or(0);
+    debug!(
+        "tracker:get_issues start scroll={} has_query={} filter_keys={}",
+        scroll_repr,
+        has_query,
+        filter_keys
     );
 }
 
 fn log_issue_fetch_result(
     scroll_id: Option<&str>,
-    count: usize,
     has_more: bool,
     next_scroll_id: Option<&str>,
 ) {
-    println!(
-        "[tracker:get_issues] scroll={} -> {} issues (has_more={} next_scroll={})",
+    debug!(
+        "tracker:get_issues result scroll={} has_more={} next_scroll={}",
         describe_scroll_id(scroll_id),
-        count,
         has_more,
         describe_scroll_id(next_scroll_id)
     );
@@ -1498,7 +1564,7 @@ fn emit_update_available_event(app: &tauri::AppHandle, update: &Update, automati
     };
 
     if let Err(err) = app.emit("updater://available", &payload) {
-        eprintln!("Failed to emit updater event: {}", err);
+        warn!("Failed to emit updater event: {}", err);
     }
 }
 
@@ -1514,6 +1580,14 @@ async fn check_for_updates_and_emit(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp_millis()
+    .try_init();
+
+    info!("Starting YTracker native runtime");
+
     let timer = Arc::new(Timer::new());
     let timer_for_thread = timer.clone();
     let timer_for_tray_setup = timer.clone();
@@ -1542,7 +1616,7 @@ pub fn run() {
             let startup_update_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = check_for_updates_and_emit(startup_update_handle, true).await {
-                    eprintln!("Automatic update check failed: {}", err);
+                    warn!("Automatic update check failed: {}", err);
                 }
             });
             let initial_issues = issue_store_for_setup.snapshot();
@@ -1573,7 +1647,8 @@ pub fn run() {
                             if let Err(err) =
                                 refresh_issue_cache(app_handle, issue_store, timer, None).await
                             {
-                                eprintln!("Failed to refresh issues from tray: {}", err);
+                                warn!("Failed to refresh issues from tray");
+                                debug!("Tray refresh details: {}", redact_log_details(&err));
                             }
                         });
                     }
@@ -1581,6 +1656,11 @@ pub fn run() {
                         let (elapsed, maybe_key) = tray_timer.stop();
                         broadcast_timer_state(app, &tray_timer, &tray_issue_store);
                         if let Some(issue_key) = maybe_key.as_deref() {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                            emit_timer_stopped_event(app, issue_key, elapsed);
                             notify_timer_stopped(app, issue_key, elapsed);
                         }
                     }
@@ -1607,15 +1687,24 @@ pub fn run() {
             let refresh_timer = timer_for_refresh_loop.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    if let Err(err) = refresh_issue_cache(
-                        refresh_app_handle.clone(),
-                        refresh_issue_store.clone(),
-                        refresh_timer.clone(),
-                        None,
-                    )
-                    .await
-                    {
-                        eprintln!("Background issue refresh failed: {}", err);
+                    match has_session_from_app(&refresh_app_handle).await {
+                        Ok(true) => {
+                            if let Err(err) = refresh_issue_cache(
+                                refresh_app_handle.clone(),
+                                refresh_issue_store.clone(),
+                                refresh_timer.clone(),
+                                None,
+                            )
+                            .await
+                            {
+                                warn!("Background issue refresh failed");
+                                debug!("Background refresh details: {}", redact_log_details(&err));
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            debug!("Background issue refresh skipped: {}", err);
+                        }
                     }
                     sleep(std::time::Duration::from_secs(ISSUE_REFRESH_INTERVAL_SECS)).await;
                 }
@@ -1637,7 +1726,7 @@ pub fn run() {
                             &thread_issue_store.snapshot(),
                             &state,
                         ) {
-                            eprintln!("Failed to refresh tray menu: {}", err);
+                            warn!("Failed to refresh tray menu: {}", err);
                         }
                     }
 
@@ -1666,7 +1755,7 @@ pub fn run() {
                             .body(body)
                             .show()
                         {
-                            eprintln!("Failed to show notification: {}", err);
+                            warn!("Failed to show notification: {}", err);
                         }
                     }
                 }
