@@ -222,7 +222,7 @@ async fn refresh_issue_cache(
     };
     let issues = match fetch_issues_native(&app, &params).await {
         Ok(issues) => {
-            debug!("Issue cache refreshed with {} issues", issues.len());
+            debug!("Issue cache refreshed");
             issues
         }
         Err(e) => {
