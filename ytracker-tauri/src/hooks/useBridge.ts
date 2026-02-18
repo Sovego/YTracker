@@ -495,6 +495,10 @@ export function useIssueDetails() {
         );
     };
 
+    const getTodayLoggedSecondsForIssues = async (issueKeys: string[]) => {
+        return invoke<number>("get_today_logged_seconds_for_issues", { issueKeys });
+    };
+
     const executeTransition = async (issueKey: string, transitionId: string, comment?: string, resolution?: string) => {
         const result = await invoke("execute_transition", { issueKey, transitionId, comment, resolution });
         invalidateCache(issueKey, "transitions");
@@ -581,6 +585,7 @@ export function useIssueDetails() {
         previewInlineImage,
         getTransitions,
         getIssueWorklogs,
+        getTodayLoggedSecondsForIssues,
         executeTransition,
         getCachedDetails,
         clearIssueCache,
@@ -846,7 +851,11 @@ export function useConfig() {
         }
 
         const handleConfigUpdated = (event: Event) => {
-            const customEvent = event as CustomEvent<Config>;
+            const customEvent = event as CustomEvent<Config | null>;
+            if (customEvent.detail === null) {
+                setConfig(null);
+                return;
+            }
             if (customEvent.detail) {
                 setConfig(customEvent.detail);
             }
@@ -935,7 +944,7 @@ export function useAccount() {
             cachedConfig = null;
             configPromise = null;
             if (typeof window !== "undefined") {
-                window.dispatchEvent(new CustomEvent(CONFIG_UPDATED_EVENT));
+                window.dispatchEvent(new CustomEvent<Config | null>(CONFIG_UPDATED_EVENT, { detail: null }));
             }
         } catch (err) {
             setError(String(err));

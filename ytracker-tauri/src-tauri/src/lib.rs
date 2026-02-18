@@ -774,19 +774,28 @@ async fn fetch_today_logged_seconds_for_issues(
     issues: &[bridge::Issue],
     workday_hours: u64,
 ) -> Result<u64, String> {
+    let issue_keys: Vec<String> = issues.iter().map(|issue| issue.key.clone()).collect();
+    fetch_today_logged_seconds_for_issue_keys(app, &issue_keys, workday_hours).await
+}
+
+async fn fetch_today_logged_seconds_for_issue_keys(
+    app: &tauri::AppHandle,
+    issue_keys: &[String],
+    workday_hours: u64,
+) -> Result<u64, String> {
     let secrets = secrets_from_app(app)?;
     let client = build_tracker_client(&secrets)?;
     let today_key = current_local_day_key();
     let mut unique_keys = HashSet::new();
     let mut total = 0u64;
 
-    for issue in issues {
-        if !unique_keys.insert(issue.key.clone()) {
+    for issue_key in issue_keys {
+        if !unique_keys.insert(issue_key.clone()) {
             continue;
         }
 
         let entries = client
-            .get_issue_worklogs(&issue.key)
+            .get_issue_worklogs(issue_key)
             .await
             .map_err(|err| err.to_string())?;
 
@@ -815,6 +824,20 @@ async fn fetch_today_logged_seconds_for_issues(
     }
 
     Ok(total)
+}
+
+#[tauri::command]
+async fn get_today_logged_seconds_for_issues(
+    app: tauri::AppHandle,
+    issue_keys: Vec<String>,
+) -> Result<u64, String> {
+    if issue_keys.is_empty() {
+        return Ok(0);
+    }
+
+    let config = ConfigManager::new().load();
+    let workday_hours = sanitize_workday_hours(config.workday_hours);
+    fetch_today_logged_seconds_for_issue_keys(&app, &issue_keys, workday_hours).await
 }
 
 async fn fetch_statuses_native(
@@ -2216,6 +2239,7 @@ pub fn run() {
             get_issues,
             get_issue,
             get_issue_worklogs,
+            get_today_logged_seconds_for_issues,
             get_checklist,
             add_checklist_item,
             edit_checklist_item,

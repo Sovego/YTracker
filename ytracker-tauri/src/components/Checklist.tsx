@@ -110,9 +110,7 @@ export function Checklist({
             const payload: ChecklistItemCreatePayload = {
                 text: newText.trim(),
                 assignee: newAssignee.trim() || undefined,
-                deadline: newDeadline
-                    ? new Date(newDeadline).toISOString()
-                    : undefined,
+                deadline: newDeadline || undefined,
                 deadline_type: newDeadline ? "date" : undefined,
             };
             await onAddItem(issueKey, payload);
@@ -151,9 +149,7 @@ export function Checklist({
             const update: ChecklistItemUpdatePayload = {
                 text: editText.trim() || undefined,
                 assignee: editAssignee.trim() || undefined,
-                deadline: editDeadline
-                    ? new Date(editDeadline).toISOString()
-                    : undefined,
+                deadline: editDeadline || undefined,
                 deadline_type: editDeadline ? "date" : undefined,
             };
             await onEditItem(issueKey, editingItemId, update);

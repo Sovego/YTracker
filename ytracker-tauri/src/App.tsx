@@ -51,7 +51,7 @@ function App() {
   const { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore } = useTracker();
   const { state: timerState, start: invokeStartTimer, stop: invokeStopTimer } = useTimer();
   const { config } = useConfig();
-  const { getIssueWorklogs } = useIssueDetails();
+  const { getTodayLoggedSecondsForIssues } = useIssueDetails();
   const {
     queues,
     projects,
@@ -176,40 +176,17 @@ function App() {
       return;
     }
 
-    const isToday = (value: string) => {
-      if (!value) return false;
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) return false;
-      const now = new Date();
-      return (
-        date.getFullYear() === now.getFullYear() &&
-        date.getMonth() === now.getMonth() &&
-        date.getDate() === now.getDate()
-      );
-    };
-
     const calculateTodayTracked = async () => {
       setLoadingTodayProgress(true);
       const keys = Array.from(new Set(issues.map((issue) => issue.key)));
       try {
-        const totals = await Promise.all(
-          keys.map(async (key) => {
-            try {
-              const entries = await getIssueWorklogs(key, { forceRefresh: true });
-              return entries.reduce((sum, entry) => {
-                if (!isToday(entry.date)) {
-                  return sum;
-                }
-                return sum + (entry.duration_seconds || 0);
-              }, 0);
-            } catch {
-              return 0;
-            }
-          })
-        );
-
+        const total = await getTodayLoggedSecondsForIssues(keys);
         if (!cancelled) {
-          setLoggedTodaySeconds(totals.reduce((sum, value) => sum + value, 0));
+          setLoggedTodaySeconds(total);
+        }
+      } catch {
+        if (!cancelled) {
+          setLoggedTodaySeconds(0);
         }
       } finally {
         if (!cancelled) {
@@ -248,7 +225,7 @@ function App() {
 
         const success = await fetchIssues(initialSearchOptionsRef.current);
         if (!cancelled) {
-          setIsAuthenticated(true);
+          setIsAuthenticated(success);
           if (success) {
             setActiveSearchOptions(initialSearchOptionsRef.current);
           }
