@@ -1199,7 +1199,6 @@ async fn get_issues(
 
     log_issue_fetch_result(
         scroll_id.as_deref(),
-        page.issues.len(),
         page.has_more,
         page.next_scroll_id.as_deref(),
     );
@@ -1250,14 +1249,12 @@ fn log_issue_fetch_start(
 
 fn log_issue_fetch_result(
     scroll_id: Option<&str>,
-    count: usize,
     has_more: bool,
     next_scroll_id: Option<&str>,
 ) {
     debug!(
-        "tracker:get_issues result scroll={} issues={} has_more={} next_scroll={}",
+        "tracker:get_issues result scroll={} has_more={} next_scroll={}",
         describe_scroll_id(scroll_id),
-        count,
         has_more,
         describe_scroll_id(next_scroll_id)
     );
