@@ -1,3 +1,5 @@
+//! Generic key/display model and parsing helpers for Tracker entities.
+
 use serde::de::Deserializer;
 use serde::Deserialize;
 use serde_json::Value;
@@ -5,6 +7,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+// Represents a simple Tracker entity with stable key/id and display value.
 pub struct SimpleEntityRaw {
     #[serde(default, deserialize_with = "deserialize_string_field")]
     pub id: Option<String>,
@@ -15,7 +18,7 @@ pub struct SimpleEntityRaw {
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
-
+/// Normalized entity model with stable key/id and display value.
 fn deserialize_string_field<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,

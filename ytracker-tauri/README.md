@@ -3,6 +3,13 @@
 This workspace is the only runtime needed to build and ship YTracker. The React/Vite frontend talks
 directly to a native Rust backend (no embedded Python, PyO3 bridge, or runtime bootstrapping).
 
+## Documentation
+
+- Documentation standards: `docs/documentation-standards.md`
+- Architecture map: `docs/architecture.md`
+- Frontend/native contracts: `docs/contracts.md`
+- Build/runtime configuration notes: `docs/configuration.md`
+
 ## Prerequisites
 
 - Rust stable toolchain compatible with Tauri 2.
@@ -37,9 +44,7 @@ and updater metadata. No extra runtime assets are required.
 
 YTracker ships with the [Tauri updater plugin](https://v2.tauri.app/plugin/updater/), so the app can
 discover and install releases that you publish on GitHub. The update endpoint points to
-`https://github.com/Sovego/YTracker/releases/latest/download/latest.json`, following the workflow
-discussed in [tauri-apps/discussions/10206](https://github.com/orgs/tauri-apps/discussions/10206).
-
+`https://github.com/Sovego/YTracker/releases/latest/download/latest.json`
 ### Signing keys
 
 All updater artifacts must be signed. Generate the key pair once and store it in a secure location:

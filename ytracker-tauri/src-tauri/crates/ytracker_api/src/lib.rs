@@ -1,3 +1,5 @@
+//! Typed Yandex Tracker API client crate used by the native app backend.
+
 pub mod auth;
 pub mod client;
 pub mod config;

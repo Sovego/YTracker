@@ -1,9 +1,12 @@
+//! Core issue models and dynamic field payload abstractions.
+
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+/// Represents a Tracker issue returned by API, including dynamic field references and time tracking metadata.
 pub struct Issue {
     pub key: String,
     pub summary: Option<String>,
@@ -20,6 +23,7 @@ pub struct Issue {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
+/// Represents a dynamic issue field reference which can be either a structured object with stable key/id and display values, or a simple text value.
 pub enum IssueFieldRef {
     Object(IssueFieldPayload),
     Text(String),
@@ -27,6 +31,7 @@ pub enum IssueFieldRef {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+/// Represents the structured payload of a dynamic issue field reference, including stable key/id, display/name and any additional metadata.
 pub struct IssueFieldPayload {
     pub id: Option<String>,
     pub key: Option<String>,
@@ -39,6 +44,7 @@ pub struct IssueFieldPayload {
 }
 
 impl IssueFieldRef {
+    /// Returns stable key/id for dynamic issue field reference.
     pub fn key(&self) -> Option<String> {
         match self {
             IssueFieldRef::Object(payload) => payload.key.clone().or_else(|| payload.id.clone()),
@@ -46,6 +52,7 @@ impl IssueFieldRef {
         }
     }
 
+    /// Returns display/name value normalized as JSON value.
     pub fn display_value(&self) -> Option<Value> {
         match self {
             IssueFieldRef::Object(payload) => {

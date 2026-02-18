@@ -1,3 +1,5 @@
+//! Secure storage wrappers for OAuth credentials and session tokens.
+
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -14,18 +16,21 @@ const LEGACY_KEYRING_SERVICES: [&str; 3] = [
     "ru.sovego.YTracker",
 ];
 
+/// Represents client credentials required for OAuth authentication, including client ID and secret.
 #[derive(Debug, Clone)]
 pub struct ClientCredentials {
     pub client_id: String,
     pub client_secret: String,
 }
 
+/// Represents public metadata about configured client credentials, safe for display in UI or logs.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientCredentialsInfo {
     pub client_id: Option<String>,
     pub has_client_secret: bool,
 }
 
+/// Represents a session token containing access token and organization metadata, which can be persisted in secure storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionToken {
     pub token: String,
@@ -33,11 +38,13 @@ pub struct SessionToken {
     pub org_type: String,
 }
 
+/// Manages secure storage and retrieval of session tokens and client credentials, with in-memory caching and legacy migration support.
 #[derive(Clone)]
 pub struct SecretsManager {
     inner: Arc<SecretsInner>,
 }
 
+/// Internal structure holding keyring service identifier, in-memory session cache and client credentials.
 struct SecretsInner {
     keyring_service: String,
     session_cache: Mutex<Option<SessionToken>>,
@@ -47,6 +54,7 @@ struct SecretsInner {
 }
 
 impl SecretsManager {
+    /// Creates manager instance and primes in-memory session cache from keyring.
     pub fn initialize(app_handle: &AppHandle) -> Result<Self, String> {
         let identifier = app_handle.config().identifier.clone();
         let service = if identifier.trim().is_empty() {
@@ -71,10 +79,12 @@ impl SecretsManager {
         Ok(manager)
     }
 
+    /// Returns shared API rate limiter configured for current session context.
     pub fn get_rate_limiter(&self) -> RateLimiter {
         self.inner.rate_limiter.clone()
     }
 
+    /// Returns safe-to-display metadata about configured client credentials.
     pub fn get_public_info(&self) -> Result<ClientCredentialsInfo, String> {
         Ok(ClientCredentialsInfo {
             client_id: self.inner.client_id.clone(),
@@ -82,6 +92,7 @@ impl SecretsManager {
         })
     }
 
+    /// Returns OAuth client credentials if both id and secret are configured.
     pub fn get_credentials(&self) -> Result<Option<ClientCredentials>, String> {
         match (&self.inner.client_id, &self.inner.client_secret) {
             (Some(id), Some(secret)) => Ok(Some(ClientCredentials {
@@ -92,6 +103,7 @@ impl SecretsManager {
         }
     }
 
+    /// Persists OAuth access token and organization metadata into secure storage.
     pub fn save_session(
         &self,
         token: &str,
@@ -120,6 +132,7 @@ impl SecretsManager {
         Ok(())
     }
 
+    /// Loads current session from cache or secure storage.
     pub fn get_session(&self) -> Result<Option<SessionToken>, String> {
         {
             let cache = self.inner.session_cache.lock().unwrap();
@@ -133,12 +146,14 @@ impl SecretsManager {
         Ok(session)
     }
 
+    /// Clears persisted session and in-memory cache.
     pub fn clear_session(&self) -> Result<(), String> {
         self.persist_session(None)?;
         *self.inner.session_cache.lock().unwrap() = None;
         Ok(())
     }
 
+    /// Reads session from current keyring service, with legacy migration fallback.
     fn load_session_from_store(&self) -> Result<Option<SessionToken>, String> {
         let current_service = self.inner.keyring_service.as_str();
         let current_entry = self.session_entry_for_service(current_service)?;
@@ -171,6 +186,7 @@ impl SecretsManager {
         Ok(None)
     }
 
+    /// Writes or deletes serialized session payload in secure keyring storage.
     fn persist_session(&self, session: Option<&SessionToken>) -> Result<(), String> {
         let entry = self.session_entry()?;
         match session {
@@ -188,15 +204,18 @@ impl SecretsManager {
         }
     }
 
+    /// Returns keyring entry for the active service identifier.
     fn session_entry(&self) -> Result<Entry, String> {
         self.session_entry_for_service(&self.inner.keyring_service)
     }
 
+    /// Opens keyring entry for an explicit keyring service identifier.
     fn session_entry_for_service(&self, service: &str) -> Result<Entry, String> {
         Entry::new(service, KEYRING_ACCOUNT)
             .map_err(|err| format!("Failed to open keyring entry for '{service}': {err}"))
     }
 
+    /// Reads and deserializes a session payload from a keyring entry.
     fn read_session_from_entry(
         &self,
         entry: &Entry,
@@ -217,6 +236,7 @@ impl SecretsManager {
     }
 }
 
+/// Canonicalizes external org type input into supported backend values.
 fn normalize_org_type(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         "cloud" => "cloud".to_string(),

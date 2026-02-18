@@ -1,3 +1,4 @@
+# Native Tauri application crate manifest.
 [package]
 name = "ytracker-tauri"
 version = "0.2.0"

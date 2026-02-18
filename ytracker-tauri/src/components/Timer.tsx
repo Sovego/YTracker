@@ -1,3 +1,6 @@
+/**
+ * Compact widget showing active timer state with stop action.
+ */
 import { TimerState } from "../hooks/useBridge";
 import { Square, Clock } from "lucide-react";
 import { formatDuration } from "../utils";
@@ -7,6 +10,9 @@ interface TimerWidgetProps {
     onStop: () => void;
 }
 
+/**
+ * Displays elapsed timer duration and stop control when tracking is active.
+ */
 export function TimerWidget({ state, onStop }: TimerWidgetProps) {
     if (!state.active) {
         return null;

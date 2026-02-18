@@ -1,6 +1,9 @@
+//! Timer state machine used for local issue time tracking.
+
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
+/// Represents the current state of the timer, including whether it's active, which issue is being tracked, when it started and how much time has elapsed.
 #[derive(Clone, Serialize, Debug)]
 pub struct TimerState {
     pub active: bool,
@@ -10,12 +13,14 @@ pub struct TimerState {
     pub elapsed: u64,
 }
 
+/// Thread-safe timer runtime storing active issue and elapsed tracking data.
 pub struct Timer {
     state: Arc<Mutex<TimerState>>,
     last_notification_at: Arc<Mutex<Option<u64>>>,
 }
 
 impl Timer {
+    /// Creates a new idle timer instance.
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(TimerState {
@@ -29,6 +34,7 @@ impl Timer {
         }
     }
 
+    /// Returns current unix timestamp in seconds.
     fn now_secs() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -36,6 +42,7 @@ impl Timer {
             .as_secs()
     }
 
+    /// Starts tracking time for an issue and resets elapsed counter.
     pub fn start(&self, issue_key: String, issue_summary: Option<String>) {
         let now = Self::now_secs();
         {
@@ -50,6 +57,7 @@ impl Timer {
         *last_notification = Some(now);
     }
 
+    /// Stops timer and returns elapsed seconds with previously active issue key.
     pub fn stop(&self) -> (u64, Option<String>) {
         let mut state = self.state.lock().unwrap();
         if !state.active {
@@ -75,6 +83,7 @@ impl Timer {
         (elapsed, key)
     }
 
+    /// Returns a snapshot with elapsed recomputed when timer is active.
     pub fn get_state(&self) -> TimerState {
         let state = self.state.lock().unwrap();
         let mut snapshot = state.clone();
@@ -86,6 +95,7 @@ impl Timer {
         snapshot
     }
 
+    /// Returns timer snapshot only when periodic notification interval is due.
     pub fn check_notification_due(&self, interval_secs: u64) -> Option<TimerState> {
         if interval_secs == 0 {
             return None;

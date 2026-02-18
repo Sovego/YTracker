@@ -1,3 +1,5 @@
+//! Error model used by Tracker API client operations.
+
 use std::io;
 
 use reqwest::StatusCode;
@@ -5,6 +7,7 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, TrackerError>;
 
+/// Represents various error conditions that can occur during Tracker API interactions, including HTTP errors with status and message, authentication failures, timeouts, network issues, serialization problems and other unexpected errors.
 #[derive(Debug, Error)]
 pub enum TrackerError {
     #[error("http {status}: {message}")]
@@ -28,6 +31,7 @@ pub enum TrackerError {
 }
 
 impl TrackerError {
+    /// Constructs an HTTP error variant with optional API-specific code.
     pub fn http(status: StatusCode, code: Option<String>, message: impl Into<String>) -> Self {
         TrackerError::Http {
             status,
@@ -38,6 +42,7 @@ impl TrackerError {
 }
 
 impl From<reqwest::Error> for TrackerError {
+    /// Converts reqwest errors into semantic TrackerError variants.
     fn from(err: reqwest::Error) -> Self {
         if err.is_timeout() {
             TrackerError::Timeout(err.to_string())
@@ -57,6 +62,7 @@ impl From<reqwest::Error> for TrackerError {
 }
 
 impl From<serde_json::Error> for TrackerError {
+    /// Converts serde_json decode/encode failures into serialization errors.
     fn from(err: serde_json::Error) -> Self {
         TrackerError::Serialization(err.to_string())
     }

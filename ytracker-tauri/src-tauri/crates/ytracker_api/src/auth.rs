@@ -1,3 +1,5 @@
+//! OAuth token exchange helpers for Tracker authentication.
+
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -6,6 +8,7 @@ use crate::error::{Result, TrackerError};
 const TOKEN_URL: &str = "https://oauth.yandex.ru/token";
 
 #[derive(Debug, Deserialize, Clone)]
+/// OAuth token response payload returned by Tracker auth endpoint.
 pub struct TokenResponse {
     #[serde(rename = "access_token")]
     pub access_token: String,
@@ -17,6 +20,7 @@ pub struct TokenResponse {
     pub scope: Option<String>,
 }
 
+/// Exchanges OAuth authorization code for an access token.
 pub async fn exchange_code(
     code: &str,
     client_id: &str,

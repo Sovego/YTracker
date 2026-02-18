@@ -1,3 +1,5 @@
+//! Tracker API model declarations and re-exports used by the client module.
+
 mod attachment;
 mod checklist;
 mod comment;

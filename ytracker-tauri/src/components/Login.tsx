@@ -1,8 +1,14 @@
+/**
+ * OAuth/client-credentials login screen for initial app authentication.
+ */
 import { useState, type FormEvent } from "react";
 import { useAuth, useClientCredentials } from "../hooks/useBridge";
 import { KeyRound, Loader2, ChevronDown, ShieldAlert } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+/**
+ * Renders login workflows and notifies parent after successful auth.
+ */
 export function Login({ onLoginSuccess }: { onLoginSuccess: () => void }) {
     const { exchangeCode, loading, error } = useAuth();
     const {

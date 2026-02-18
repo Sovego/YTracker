@@ -1,3 +1,6 @@
+/**
+ * Vite configuration for the React frontend bundled with Tauri.
+ */
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 

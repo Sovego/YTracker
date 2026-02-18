@@ -1,5 +1,11 @@
+/**
+ * React hook helpers for media-query driven responsive behavior.
+ */
 import { useEffect, useState } from "react";
 
+/**
+ * Subscribes to a media query and returns whether it currently matches.
+ */
 export function useMediaQuery(query: string) {
     const getMatches = () => {
         if (typeof window === "undefined" || typeof window.matchMedia !== "function") {

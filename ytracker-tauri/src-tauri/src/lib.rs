@@ -1,3 +1,8 @@
+//! Native backend runtime and Tauri command surface.
+//!
+//! This module owns command handlers consumed by `useBridge.ts`, app state
+//! wiring, and event emission contracts (`timer-tick`, updater events).
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use chrono::{DateTime, Duration, Local, NaiveTime, Utc};
@@ -69,6 +74,7 @@ const WORKDAY_MOTIVATION_PHRASES: [&str; 8] = [
     "Your future self will thank you for this final stretch.",
 ];
 
+/// Returns default filter map used for issue refresh/tray cache updates.
 fn default_filter_map() -> JsonMap<String, Value> {
     let mut map = JsonMap::new();
     map.insert("assignee".to_string(), Value::String("me()".to_string()));
@@ -101,6 +107,7 @@ struct IssuePagePayload {
     has_more: bool,
 }
 
+/// Formats elapsed seconds for compact human-readable tray labels.
 fn format_elapsed(elapsed: u64) -> String {
     let hours = elapsed / 3600;
     let minutes = (elapsed % 3600) / 60;
@@ -111,14 +118,17 @@ fn format_elapsed(elapsed: u64) -> String {
     }
 }
 
+/// Parses local workday time in `HH:MM` format.
 fn parse_workday_time(value: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(value.trim(), "%H:%M").ok()
 }
 
+/// Returns current local day key used for same-day aggregation logic.
 fn current_local_day_key() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
 
+/// Parses Tracker datetime string into local timezone representation.
 fn parse_tracker_datetime(value: &str) -> Option<DateTime<Local>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -130,6 +140,7 @@ fn parse_tracker_datetime(value: &str) -> Option<DateTime<Local>> {
         })
 }
 
+/// Picks a pseudo-random motivational phrase for workday notifications.
 fn motivational_phrase() -> &'static str {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -139,10 +150,12 @@ fn motivational_phrase() -> &'static str {
     WORKDAY_MOTIVATION_PHRASES[index]
 }
 
+/// Collapses repeated whitespace to a single space.
 fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Truncates text by character count and appends ellipsis.
 fn truncate_text(value: &str, limit: usize) -> String {
     let trimmed = value.trim();
     if trimmed.chars().count() <= limit {
@@ -156,6 +169,7 @@ fn truncate_text(value: &str, limit: usize) -> String {
     truncated
 }
 
+/// Redacts potentially sensitive details from loggable error text.
 fn redact_log_details(value: &str) -> String {
     let collapsed = collapse_whitespace(value);
     let category = collapsed
@@ -188,6 +202,7 @@ fn redact_log_details(value: &str) -> String {
     truncate_text(&collapsed, 180)
 }
 
+/// Builds human-friendly issue label for tray entries.
 fn format_issue_label(issue: &bridge::Issue) -> String {
     let summary = collapse_whitespace(&issue.summary);
     if summary.is_empty() {
@@ -197,6 +212,7 @@ fn format_issue_label(issue: &bridge::Issue) -> String {
     }
 }
 
+/// Builds tray label for currently running timer state.
 fn format_running_label(state: &timer::TimerState) -> String {
     let key = state.issue_key.as_deref().unwrap_or("Timer");
     let summary = state
@@ -213,10 +229,12 @@ fn format_running_label(state: &timer::TimerState) -> String {
     )
 }
 
+/// Creates deterministic tray menu item id for an issue key.
 fn issue_menu_id(issue_key: &str) -> String {
     format!("{}{}", ISSUE_MENU_PREFIX, issue_key)
 }
 
+/// Shows a system notification when timer starts.
 fn notify_timer_started(app: &tauri::AppHandle, issue_key: &str, summary: Option<&str>) {
     let title = format!("Timer started: {}", issue_key);
     let body = summary
@@ -229,6 +247,7 @@ fn notify_timer_started(app: &tauri::AppHandle, issue_key: &str, summary: Option
     }
 }
 
+/// Shows a system notification when timer stops.
 fn notify_timer_stopped(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
     let title = format!("Timer stopped: {}", issue_key);
     let body = format!("Tracked {}", format_elapsed(elapsed));
@@ -238,6 +257,7 @@ fn notify_timer_stopped(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
     }
 }
 
+/// Emits frontend event indicating timer was stopped from any surface.
 fn emit_timer_stopped_event(app: &tauri::AppHandle, issue_key: &str, elapsed: u64) {
     let payload = TimerStoppedPayload {
         issue_key: issue_key.to_string(),
@@ -249,6 +269,7 @@ fn emit_timer_stopped_event(app: &tauri::AppHandle, issue_key: &str, elapsed: u6
     }
 }
 
+/// Broadcasts timer snapshot and updates tray menu to reflect latest state.
 fn broadcast_timer_state(app: &tauri::AppHandle, timer: &Arc<Timer>, issue_store: &IssueStore) {
     let snapshot = timer.get_state();
     if let Err(err) = app.emit("timer-tick", &snapshot) {
@@ -259,6 +280,7 @@ fn broadcast_timer_state(app: &tauri::AppHandle, timer: &Arc<Timer>, issue_store
     }
 }
 
+/// Refreshes cached issue snapshot used by tray/timer integration.
 async fn refresh_issue_cache(
     app: tauri::AppHandle,
     issue_store: IssueStore,
@@ -290,6 +312,7 @@ async fn refresh_issue_cache(
     Ok(issues)
 }
 
+/// Builds tray menu tree for timer controls and recent issues.
 fn build_tray_menu<R: Runtime>(
     app: &tauri::AppHandle<R>,
     issues: &[bridge::Issue],
@@ -370,6 +393,7 @@ fn build_tray_menu<R: Runtime>(
     Ok(menu)
 }
 
+/// Rebuilds tray menu and title based on current issue list and timer state.
 fn update_tray_menu<R: Runtime>(
     app: &tauri::AppHandle<R>,
     issues: &[bridge::Issue],
@@ -394,11 +418,13 @@ fn update_tray_menu<R: Runtime>(
     Ok(())
 }
 
+/// Development helper command used by Tauri template scaffolding.
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Persists tracked work as a worklog entry for a specific issue.
 #[tauri::command]
 async fn log_work(
     issue_key: String,
@@ -410,6 +436,7 @@ async fn log_work(
     log_work_native(secrets_clone, &issue_key, &duration, &comment).await
 }
 
+/// Returns the currently authenticated Tracker user profile.
 #[tauri::command]
 async fn get_current_user(
     secrets: tauri::State<'_, SecretsManager>,
@@ -417,6 +444,7 @@ async fn get_current_user(
     get_current_user_native(&secrets).await
 }
 
+/// Clears session/token state and resets timer/issue runtime state.
 #[tauri::command]
 async fn logout(
     app: tauri::AppHandle,
@@ -855,6 +883,7 @@ async fn fetch_today_logged_seconds_for_issue_keys(
     Ok(total)
 }
 
+/// Aggregates today's logged seconds for the provided issue keys.
 #[tauri::command]
 async fn get_today_logged_seconds_for_issues(
     app: tauri::AppHandle,
@@ -1463,6 +1492,7 @@ fn convert_worklogs_native(entries: Vec<NativeWorklogEntry>, workday_hours: u64)
         .collect()
 }
 
+/// Converts Tracker transition destination payload into bridge status DTO.
 fn convert_transition_status(
     status: Option<&ytracker_api::TransitionDestination>,
 ) -> Option<bridge::Status> {
@@ -1491,12 +1521,14 @@ fn convert_transition_status(
     })
 }
 
+/// Loads normalized desktop configuration from local storage.
 #[tauri::command]
 fn get_config() -> Config {
     let cm = ConfigManager::new();
     normalize_config(cm.load())
 }
 
+/// Saves desktop configuration after normalization/canonicalization.
 #[tauri::command]
 fn save_config(config: Config) -> Result<(), String> {
     let cm = ConfigManager::new();
@@ -1504,6 +1536,7 @@ fn save_config(config: Config) -> Result<(), String> {
     cm.save(&normalized).map_err(|e| e.to_string())
 }
 
+/// Returns non-secret metadata about configured OAuth client credentials.
 #[tauri::command]
 async fn get_client_credentials_info(
     secrets: tauri::State<'_, SecretsManager>,
@@ -1515,6 +1548,7 @@ async fn get_client_credentials_info(
     Ok(info)
 }
 
+/// Reports whether an OAuth session token is currently available.
 #[tauri::command]
 async fn has_session(secrets: tauri::State<'_, SecretsManager>) -> Result<bool, String> {
     let manager = secrets.inner().clone();
@@ -1525,6 +1559,7 @@ async fn has_session(secrets: tauri::State<'_, SecretsManager>) -> Result<bool, 
     Ok(has_session)
 }
 
+/// Exchanges OAuth authorization code for tokens and persists session.
 #[tauri::command]
 async fn exchange_code(
     code: String,
@@ -1555,6 +1590,7 @@ async fn exchange_code(
     Ok(true)
 }
 
+/// Searches issues with optional query/filter and scroll pagination support.
 #[tauri::command]
 async fn get_issues(
     app: tauri::AppHandle,
@@ -1611,6 +1647,7 @@ async fn get_issues(
     Ok(page)
 }
 
+/// Normalizes raw filter payload into non-empty JSON object map.
 fn normalize_filter_map(filter: Option<Value>) -> Option<JsonMap<String, Value>> {
     filter.and_then(|value| match value {
         Value::Object(map) if !map.is_empty() => Some(map),
@@ -1618,6 +1655,7 @@ fn normalize_filter_map(filter: Option<Value>) -> Option<JsonMap<String, Value>>
     })
 }
 
+/// Shortens scroll ids for debug-safe logging.
 fn describe_scroll_id(scroll_id: Option<&str>) -> String {
     match scroll_id {
         Some(id) if id.len() > 12 => format!("{}…", &id[..12]),
@@ -1626,6 +1664,7 @@ fn describe_scroll_id(scroll_id: Option<&str>) -> String {
     }
 }
 
+/// Emits structured debug log before issue page fetch.
 fn log_issue_fetch_start(
     scroll_id: Option<&str>,
     query: Option<&str>,
@@ -1644,6 +1683,7 @@ fn log_issue_fetch_start(
     );
 }
 
+/// Emits structured debug log after issue page fetch.
 fn log_issue_fetch_result(
     scroll_id: Option<&str>,
     has_more: bool,
@@ -1657,6 +1697,7 @@ fn log_issue_fetch_result(
     );
 }
 
+/// Rewrites shortcut filter tokens (for example `me()`) to concrete API values.
 async fn resolve_filter_shortcuts(
     params: &mut IssueSearchParams,
     client: &TrackerClient,
@@ -1674,6 +1715,7 @@ async fn resolve_filter_shortcuts(
     Ok(())
 }
 
+/// Recursively rewrites `me()` token occurrences in scalar/array filter values.
 async fn rewrite_me_tokens(
     value: &mut Value,
     client: &TrackerClient,
@@ -1706,10 +1748,12 @@ async fn rewrite_me_tokens(
     Ok(())
 }
 
+/// Returns whether value equals Tracker self shortcut token.
 fn is_me_token(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("me()")
 }
 
+/// Trims owned strings and maps empty values to `None`.
 fn normalize_owned_string(value: Option<String>) -> Option<String> {
     value.and_then(|text| {
         let trimmed = text.trim();
@@ -1721,6 +1765,7 @@ fn normalize_owned_string(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Resolves current user login once and caches it for token rewriting.
 async fn ensure_current_login(
     client: &TrackerClient,
     cached_login: &mut Option<String>,
@@ -1742,6 +1787,7 @@ async fn ensure_current_login(
     Ok(login)
 }
 
+/// Removes duplicated string values from JSON arrays in-place.
 fn dedupe_string_array(items: &mut Vec<Value>) {
     let mut seen = HashSet::new();
     items.retain(|item| {
@@ -1755,6 +1801,7 @@ fn dedupe_string_array(items: &mut Vec<Value>) {
     });
 }
 
+/// Fetches a single issue by key.
 #[tauri::command]
 async fn get_issue(
     issue_key: String,
@@ -1764,6 +1811,7 @@ async fn get_issue(
     fetch_issue_detail_native(secrets_clone, &issue_key).await
 }
 
+/// Fetches comments for a given issue.
 #[tauri::command]
 async fn get_comments(
     issue_key: String,
@@ -1773,6 +1821,7 @@ async fn get_comments(
     fetch_comments_native(secrets_clone, &issue_key).await
 }
 
+/// Fetches worklog history for a given issue.
 #[tauri::command]
 async fn get_issue_worklogs(
     issue_key: String,
@@ -1782,6 +1831,7 @@ async fn get_issue_worklogs(
     fetch_worklogs_native(secrets_clone, &issue_key).await
 }
 
+/// Fetches checklist items for a given issue.
 #[tauri::command]
 async fn get_checklist(
     issue_key: String,
@@ -1791,6 +1841,7 @@ async fn get_checklist(
     fetch_checklist_native(secrets_clone, &issue_key).await
 }
 
+/// Adds a checklist item to an issue.
 #[tauri::command]
 async fn add_checklist_item(
     issue_key: String,
@@ -1801,6 +1852,7 @@ async fn add_checklist_item(
     add_checklist_item_native(secrets_clone, &issue_key, item).await
 }
 
+/// Updates an existing checklist item on an issue.
 #[tauri::command]
 async fn edit_checklist_item(
     issue_key: String,
@@ -1812,6 +1864,7 @@ async fn edit_checklist_item(
     edit_checklist_item_native(secrets_clone, &issue_key, &item_id, update).await
 }
 
+/// Removes all checklist items from an issue.
 #[tauri::command]
 async fn delete_checklist(
     issue_key: String,
@@ -1821,6 +1874,7 @@ async fn delete_checklist(
     delete_checklist_native(secrets_clone, &issue_key).await
 }
 
+/// Removes one checklist item from an issue.
 #[tauri::command]
 async fn delete_checklist_item(
     issue_key: String,
@@ -1831,6 +1885,7 @@ async fn delete_checklist_item(
     delete_checklist_item_native(secrets_clone, &issue_key, &item_id).await
 }
 
+/// Adds a comment to an issue.
 #[tauri::command]
 async fn add_comment(
     issue_key: String,
@@ -1841,6 +1896,7 @@ async fn add_comment(
     add_comment_native(secrets_clone, &issue_key, &text).await
 }
 
+/// Updates editable issue fields such as summary/description.
 #[tauri::command]
 async fn update_issue(
     issue_key: String,
@@ -1858,6 +1914,7 @@ async fn update_issue(
     .await
 }
 
+/// Fetches attachment metadata for an issue.
 #[tauri::command]
 async fn get_attachments(
     issue_key: String,
@@ -1867,6 +1924,7 @@ async fn get_attachments(
     fetch_attachments_native(secrets_clone, &issue_key).await
 }
 
+/// Returns catalog of Tracker statuses for filters/forms.
 #[tauri::command]
 async fn get_statuses(
     secrets: tauri::State<'_, SecretsManager>,
@@ -1875,6 +1933,7 @@ async fn get_statuses(
     fetch_statuses_native(secrets_clone).await
 }
 
+/// Returns catalog of Tracker resolutions for filters/forms.
 #[tauri::command]
 async fn get_resolutions(
     secrets: tauri::State<'_, SecretsManager>,
@@ -1883,6 +1942,7 @@ async fn get_resolutions(
     fetch_resolutions_native(secrets_clone).await
 }
 
+/// Returns available Tracker queues.
 #[tauri::command]
 async fn get_queues(
     secrets: tauri::State<'_, SecretsManager>,
@@ -1891,6 +1951,7 @@ async fn get_queues(
     fetch_queues_native(secrets_clone).await
 }
 
+/// Returns available Tracker projects.
 #[tauri::command]
 async fn get_projects(
     secrets: tauri::State<'_, SecretsManager>,
@@ -1899,6 +1960,7 @@ async fn get_projects(
     fetch_projects_native(secrets_clone).await
 }
 
+/// Returns user directory entries for assignment/filtering.
 #[tauri::command]
 async fn get_users(
     secrets: tauri::State<'_, SecretsManager>,
@@ -1907,6 +1969,7 @@ async fn get_users(
     fetch_users_native(secrets_clone).await
 }
 
+/// Releases backend scroll context for a previously paged issue query.
 #[tauri::command]
 async fn release_scroll_context(app: tauri::AppHandle, scroll_id: String) -> Result<(), String> {
     if scroll_id.trim().is_empty() {
@@ -1915,6 +1978,7 @@ async fn release_scroll_context(app: tauri::AppHandle, scroll_id: String) -> Res
     release_scroll_context_native(&app, &scroll_id).await
 }
 
+/// Downloads an attachment to a selected local filesystem destination.
 #[tauri::command]
 async fn download_attachment(
     issue_key: String,
@@ -1926,6 +1990,7 @@ async fn download_attachment(
     download_attachment_native(secrets_clone, &issue_key, &attachment_id, &dest_path).await
 }
 
+/// Returns preview bytes for a binary issue attachment.
 #[tauri::command]
 async fn preview_attachment(
     issue_key: String,
@@ -1936,6 +2001,7 @@ async fn preview_attachment(
     preview_attachment_native(secrets_clone, &issue_key, &attachment_id).await
 }
 
+/// Returns preview bytes for an inline image resource URL/path.
 #[tauri::command]
 async fn preview_inline_image(
     path: String,
@@ -1945,6 +2011,7 @@ async fn preview_inline_image(
     preview_inline_resource_native(secrets_clone, &path).await
 }
 
+/// Fetches available workflow transitions for an issue.
 #[tauri::command]
 async fn get_transitions(
     issue_key: String,
@@ -1954,6 +2021,7 @@ async fn get_transitions(
     fetch_transitions_native(secrets_clone, &issue_key).await
 }
 
+/// Executes a workflow transition for an issue with optional metadata.
 #[tauri::command]
 async fn execute_transition(
     issue_key: String,
@@ -1973,6 +2041,7 @@ async fn execute_transition(
     .await
 }
 
+/// Starts local timer and emits updated timer state to frontend listeners.
 #[tauri::command]
 fn start_timer(
     app: tauri::AppHandle,
@@ -1985,6 +2054,7 @@ fn start_timer(
     broadcast_timer_state(&app, &timer, issue_store.inner());
 }
 
+/// Stops local timer, returns elapsed data, and emits final timer state.
 #[tauri::command]
 fn stop_timer(
     app: tauri::AppHandle,
@@ -1996,11 +2066,13 @@ fn stop_timer(
     result
 }
 
+/// Returns current timer state snapshot.
 #[tauri::command]
 fn get_timer_state(state: tauri::State<Arc<Timer>>) -> timer::TimerState {
     state.get_state()
 }
 
+/// Emits normalized updater-available payload to frontend listeners.
 fn emit_update_available_event(app: &tauri::AppHandle, update: &Update, automatic: bool) {
     let payload = UpdateAvailablePayload {
         version: update.version.to_string(),
@@ -2014,6 +2086,7 @@ fn emit_update_available_event(app: &tauri::AppHandle, update: &Update, automati
     }
 }
 
+/// Checks updater backend and emits availability event when update exists.
 async fn check_for_updates_and_emit(
     app: tauri::AppHandle,
     automatic: bool,
@@ -2025,6 +2098,7 @@ async fn check_for_updates_and_emit(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Boots Tauri app runtime, wiring plugins, commands, tray, and background tasks.
 pub fn run() {
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info"),

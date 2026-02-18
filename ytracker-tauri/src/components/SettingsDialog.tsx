@@ -1,3 +1,6 @@
+/**
+ * Application settings dialog for account, updater, and workday preferences.
+ */
 import { useEffect, useMemo, useState } from "react";
 import { LogOut, X, Clock, Loader2, Shield, UserRound, RefreshCcw, DownloadCloud, CheckCircle2, AlertTriangle } from "lucide-react";
 import clsx from "clsx";
@@ -21,6 +24,9 @@ const formatBytes = (value: number) => {
     return `${amount.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`;
 };
 
+/**
+ * Renders settings sections and exposes close/logout actions.
+ */
 export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
     const { profile, loading: accountLoading, error: accountError, logout } = useAccount();
     const { config, save } = useConfig();

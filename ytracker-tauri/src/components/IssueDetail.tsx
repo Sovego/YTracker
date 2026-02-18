@@ -1,3 +1,7 @@
+/**
+ * Detailed issue pane with editing, comments, attachments, transitions,
+ * worklogs, and checklist operations.
+ */
 import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity, WorklogEntry, ChecklistItem } from "../hooks/useBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -121,6 +125,9 @@ interface IssueDetailProps {
     onIssueUpdate: () => void;
 }
 
+/**
+ * Renders issue details and issue-level actions for the selected item.
+ */
 export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate }: IssueDetailProps) {
     const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions, getChecklist, addChecklistItem, editChecklistItem, deleteChecklist, deleteChecklistItem } = useIssueDetails();
 
@@ -186,6 +193,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         setStatusMenuPosition({ top, left, width });
     }, []);
 
+    /** Toggles transition/status dropdown and refreshes popover geometry on open. */
     const handleStatusButtonClick = () => {
         if (isStatusMenuOpen) {
             closeStatusMenu();
@@ -195,6 +203,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         }
     };
 
+    /** Loads issue detail-related resources in parallel and updates local view state. */
     const loadDetails = async (key: string) => {
         setLoadingDetails(true);
         try {
@@ -310,6 +319,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         };
     }, [isStatusMenuOpen, closeStatusMenu, updateStatusMenuPosition]);
 
+    /** Persists edited summary/description and requests parent issue refresh. */
     const handleSave = async () => {
         if (!activeIssue) return;
         try {
@@ -322,6 +332,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         }
     };
 
+    /** Submits new comment then refreshes comment list for active issue. */
     const handleAddComment = async () => {
         if (!activeIssue || !newComment.trim()) return;
         try {
@@ -335,6 +346,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         }
     };
 
+    /** Opens transition confirmation dialog for selected workflow transition. */
     const handleTransition = (transitionId: string) => {
         const transition = transitions.find(t => t.id === transitionId);
         if (!transition) return;
@@ -348,6 +360,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         closeStatusMenu();
     };
 
+    /** Executes transition and reloads issue details on success. */
     const confirmTransition = async () => {
         if (!activeIssue || !transitionDialog.transition) return;
 
@@ -367,6 +380,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         }
     };
 
+    /** Prompts target path/name and triggers attachment download command. */
     const handleDownload = async (att: Attachment) => {
         if (!activeIssue) return;
         const filename = prompt("Save as (filename for Downloads, or full path):", att.name);
@@ -380,6 +394,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         }
     };
 
+    /** Returns whether attachment mime type can be previewed inline in UI. */
     const supportsInlinePreview = (att: Attachment) => {
         if (att.mime_type) {
             return att.mime_type.toLowerCase().startsWith("image/");

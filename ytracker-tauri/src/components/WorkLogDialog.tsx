@@ -1,3 +1,6 @@
+/**
+ * Modal dialog for submitting tracked time as a Tracker worklog entry.
+ */
 import { useState, useEffect } from "react";
 import { useWorkLog } from "../hooks/useBridge";
 import { formatDurationHuman } from "../utils";
@@ -10,6 +13,9 @@ interface WorkLogDialogProps {
     onSuccess: () => void;
 }
 
+/**
+ * Collects worklog metadata and submits duration to backend command surface.
+ */
 export function WorkLogDialog({ issueKey, durationSeconds, onClose, onSuccess }: WorkLogDialogProps) {
     const { logWork, loading, error } = useWorkLog();
     const [duration, setDuration] = useState("");
