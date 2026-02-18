@@ -2,11 +2,15 @@ use crate::config::TrackerConfig;
 use crate::error::{Result, TrackerError};
 use crate::models::{
     AttachmentMetadata,
+    ChecklistItem as TrackerChecklistItem,
+    ChecklistItemCreate,
+    ChecklistItemUpdate,
     Comment as TrackerComment,
     Issue as TrackerIssue,
     SimpleEntityRaw,
     Transition as TrackerTransition,
     UserProfile,
+    WorklogEntry as TrackerWorklogEntry,
 };
 use crate::rate_limiter::RateLimiter;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_LANGUAGE, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
@@ -328,6 +332,130 @@ impl TrackerClient {
         self.send_expect_empty(Method::POST, &path, Some(&payload)).await
     }
 
+    pub async fn get_issue_worklogs(&self, issue_key: &str) -> Result<Vec<TrackerWorklogEntry>> {
+        const WORKLOG_PER_PAGE: usize = 100;
+        const WORKLOG_MAX_ENTRIES: usize = 500;
+
+        let path = format!("issues/{}/worklog", issue_key);
+        let mut result: Vec<TrackerWorklogEntry> = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let per_page_value = WORKLOG_PER_PAGE.to_string();
+            let mut query = vec![("perPage", per_page_value.as_str())];
+            if let Some(cursor_id) = cursor.as_deref() {
+                query.push(("id", cursor_id));
+            }
+
+            let chunk: Vec<TrackerWorklogEntry> = self.get_with_query(&path, Some(&query)).await?;
+            if chunk.is_empty() {
+                break;
+            }
+
+            let last_id = chunk
+                .last()
+                .and_then(|entry| worklog_id_string(&entry.id));
+            let chunk_len = chunk.len();
+            result.extend(chunk);
+
+            if result.len() >= WORKLOG_MAX_ENTRIES {
+                result.truncate(WORKLOG_MAX_ENTRIES);
+                break;
+            }
+
+            if chunk_len < WORKLOG_PER_PAGE {
+                break;
+            }
+
+            if let Some(next_id) = last_id {
+                cursor = Some(next_id);
+            } else {
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub async fn get_worklogs_by_params(
+        &self,
+        created_by: Option<&str>,
+        created_from: Option<&str>,
+        created_to: Option<&str>,
+    ) -> Result<Vec<TrackerWorklogEntry>> {
+        let created_by = created_by
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let created_from = created_from
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let created_to = created_to
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let created_at = if created_from.is_some() || created_to.is_some() {
+            Some(WorklogCreatedAtRange {
+                from: created_from,
+                to: created_to,
+            })
+        } else {
+            None
+        };
+
+        let payload = WorklogSearchRequest {
+            created_by,
+            created_at,
+        };
+
+        self.post("worklog/_search", &payload).await
+    }
+
+    /// GET /v3/issues/<issue_key>/checklistItems — get checklist items.
+    pub async fn get_checklist(
+        &self,
+        issue_key: &str,
+    ) -> Result<Vec<TrackerChecklistItem>> {
+        let path = format!("issues/{}/checklistItems", issue_key);
+        self.get(&path).await
+    }
+
+    /// POST /v3/issues/<issue_key>/checklistItems — create checklist / add item.
+    pub async fn add_checklist_item(
+        &self,
+        issue_key: &str,
+        item: &ChecklistItemCreate,
+    ) -> Result<Value> {
+        let path = format!("issues/{}/checklistItems", issue_key);
+        self.post(&path, item).await
+    }
+
+    /// PATCH /v3/issues/<issue_key>/checklistItems/<item_id> — edit a checklist item.
+    pub async fn edit_checklist_item(
+        &self,
+        issue_key: &str,
+        item_id: &str,
+        update: &ChecklistItemUpdate,
+    ) -> Result<Value> {
+        let path = format!("issues/{}/checklistItems/{}", issue_key, item_id);
+        self.patch(&path, update).await
+    }
+
+    /// DELETE /v3/issues/<issue_key>/checklistItems — delete entire checklist.
+    pub async fn delete_checklist(&self, issue_key: &str) -> Result<()> {
+        let path = format!("issues/{}/checklistItems", issue_key);
+        self.delete(&path).await
+    }
+
+    /// DELETE /v3/issues/<issue_key>/checklistItems/<item_id> — delete single item.
+    pub async fn delete_checklist_item(
+        &self,
+        issue_key: &str,
+        item_id: &str,
+    ) -> Result<()> {
+        let path = format!("issues/{}/checklistItems/{}", issue_key, item_id);
+        self.delete(&path).await
+    }
+
     pub async fn clear_scroll_context(&self, scroll_id: &str) -> Result<()> {
         #[derive(Serialize)]
         struct ScrollClearRequest<'a> {
@@ -551,7 +679,22 @@ impl IssueSearchParams {
     }
 }
 
-const ISSUE_SUMMARY_FIELDS: &str = "key,summary,description,status,priority";
+const ISSUE_SUMMARY_FIELDS: &str = "key,summary,description,status,priority,spent,timeSpent";
+
+fn worklog_id_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct CommentCreateRequest<'a> {
@@ -580,6 +723,23 @@ struct WorklogCreateRequest<'a> {
     duration: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     comment: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorklogSearchRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_by: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<WorklogCreatedAtRange<'a>>,
+}
+
+#[derive(Serialize)]
+struct WorklogCreatedAtRange<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]

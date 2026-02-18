@@ -9,6 +9,7 @@ pub use client::{ScrollPage, ScrollType, TrackerClient};
 pub use config::{AuthMethod, OrgType, TrackerConfig};
 pub use error::{Result, TrackerError};
 pub use models::{
-    AttachmentMetadata, Comment, Issue, IssueFieldRef, SimpleEntityRaw, Transition,
-    TransitionDestination, UserProfile,
+    AttachmentMetadata, ChecklistAssignee, ChecklistDeadline, ChecklistDeadlineInput,
+    ChecklistItem, ChecklistItemCreate, ChecklistItemUpdate, Comment, Issue, IssueFieldRef,
+    SimpleEntityRaw, Transition, TransitionDestination, UserProfile, WorklogEntry,
 };

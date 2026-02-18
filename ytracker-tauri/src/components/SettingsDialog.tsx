@@ -11,6 +11,7 @@ interface SettingsDialogProps {
 }
 
 const INTERVAL_OPTIONS = [5, 10, 15, 20, 30, 45, 60];
+const WORKDAY_HOURS_OPTIONS = [4, 6, 7, 8, 9, 10, 12];
 
 const formatBytes = (value: number) => {
     if (!value || value <= 0) return "0 B";
@@ -37,10 +38,17 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
     } = useUpdater();
 
     const [interval, setInterval] = useState<number>(15);
+    const [workdayHours, setWorkdayHours] = useState<number>(8);
+    const [workdayStartTime, setWorkdayStartTime] = useState<string>("09:00");
+    const [workdayEndTime, setWorkdayEndTime] = useState<string>("17:00");
     const [savingInterval, setSavingInterval] = useState(false);
+    const [savingWorkdayHours, setSavingWorkdayHours] = useState(false);
+    const [savingWorkdaySchedule, setSavingWorkdaySchedule] = useState(false);
     const [logoutLoading, setLogoutLoading] = useState(false);
     const [logoutError, setLogoutError] = useState<string | null>(null);
     const [intervalError, setIntervalError] = useState<string | null>(null);
+    const [workdayHoursError, setWorkdayHoursError] = useState<string | null>(null);
+    const [workdayScheduleError, setWorkdayScheduleError] = useState<string | null>(null);
 
     const progressPercent = progress?.total
         ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
@@ -55,6 +63,21 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
     }, [config?.timer_notification_interval]);
 
     useEffect(() => {
+        if (config?.workday_hours) {
+            setWorkdayHours(config.workday_hours);
+        }
+    }, [config?.workday_hours]);
+
+    useEffect(() => {
+        if (config?.workday_start_time) {
+            setWorkdayStartTime(config.workday_start_time);
+        }
+        if (config?.workday_end_time) {
+            setWorkdayEndTime(config.workday_end_time);
+        }
+    }, [config?.workday_start_time, config?.workday_end_time]);
+
+    useEffect(() => {
         const handleKeydown = (event: KeyboardEvent) => {
             if (event.key === "Escape") {
                 onClose();
@@ -63,6 +86,23 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
         document.addEventListener("keydown", handleKeydown);
         return () => document.removeEventListener("keydown", handleKeydown);
     }, [onClose]);
+
+    useEffect(() => {
+        if (typeof document === "undefined") return;
+
+        const html = document.documentElement;
+        const body = document.body;
+        const previousHtmlOverflow = html.style.overflow;
+        const previousBodyOverflow = body.style.overflow;
+
+        html.style.overflow = "hidden";
+        body.style.overflow = "hidden";
+
+        return () => {
+            html.style.overflow = previousHtmlOverflow;
+            body.style.overflow = previousBodyOverflow;
+        };
+    }, []);
 
     const handleIntervalChange = async (value: number) => {
         if (!config || value === interval) return;
@@ -77,6 +117,64 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
             setInterval(config.timer_notification_interval);
         } finally {
             setSavingInterval(false);
+        }
+    };
+
+    const handleWorkdayHoursChange = async (value: number) => {
+        if (!config || value === workdayHours) return;
+
+        setWorkdayHours(value);
+        setWorkdayHoursError(null);
+        setSavingWorkdayHours(true);
+        try {
+            await save({ ...config, workday_hours: value });
+        } catch (err) {
+            console.error(`Failed to save workday hours (${getErrorSummary(err)})`);
+            setWorkdayHoursError("Unable to save workday hours. Please try again.");
+            setWorkdayHours(config.workday_hours);
+        } finally {
+            setSavingWorkdayHours(false);
+        }
+    };
+
+    const handleWorkdayScheduleSave = async () => {
+        if (!config) return;
+
+        const [startHours, startMinutes] = workdayStartTime.split(":").map((part) => Number.parseInt(part, 10));
+        const [endHours, endMinutes] = workdayEndTime.split(":").map((part) => Number.parseInt(part, 10));
+
+        if (
+            !Number.isFinite(startHours) ||
+            !Number.isFinite(startMinutes) ||
+            !Number.isFinite(endHours) ||
+            !Number.isFinite(endMinutes)
+        ) {
+            setWorkdayScheduleError("Invalid start/end time format.");
+            return;
+        }
+
+        const startTotal = startHours * 60 + startMinutes;
+        const endTotal = endHours * 60 + endMinutes;
+        if (endTotal <= startTotal) {
+            setWorkdayScheduleError("End time must be later than start time.");
+            return;
+        }
+
+        setWorkdayScheduleError(null);
+        setSavingWorkdaySchedule(true);
+        try {
+            await save({
+                ...config,
+                workday_start_time: workdayStartTime,
+                workday_end_time: workdayEndTime,
+            });
+        } catch (err) {
+            console.error(`Failed to save workday schedule (${getErrorSummary(err)})`);
+            setWorkdayScheduleError("Unable to save workday schedule. Please try again.");
+            setWorkdayStartTime(config.workday_start_time);
+            setWorkdayEndTime(config.workday_end_time);
+        } finally {
+            setSavingWorkdaySchedule(false);
         }
     };
 
@@ -102,9 +200,9 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
     }, [profile]);
 
     return (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center px-4 motion-safe:animate-fadeUp" onClick={onClose}>
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-start justify-center px-4 py-4 sm:py-6 overflow-y-auto motion-safe:animate-fadeUp" onClick={onClose}>
             <div
-                className="w-full max-w-3xl bg-white/95 dark:bg-slate-950/95 rounded-3xl shadow-2xl border border-white/60 dark:border-slate-800/70 overflow-hidden motion-safe:animate-pop"
+                className="w-full max-w-3xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] bg-white/95 dark:bg-slate-950/95 rounded-3xl shadow-2xl border border-white/60 dark:border-slate-800/70 overflow-hidden motion-safe:animate-pop flex flex-col"
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="flex items-center justify-between px-6 py-4 border-b border-white/60 dark:border-slate-800/60">
@@ -121,7 +219,7 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
                     </button>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 p-6 overflow-y-auto flex-1">
                     {accountLoading && !profile ? (
                         <SettingsCardSkeleton title="Loading account" />
                     ) : (
@@ -183,6 +281,94 @@ export function SettingsDialog({ onClose, onLogout }: SettingsDialogProps) {
                                 )}
                                 {intervalError && (
                                     <p className="text-xs text-red-500 mt-2">{intervalError}</p>
+                                )}
+                            </div>
+
+                            <div className="rounded-2xl border border-white/60 dark:border-slate-800/60 bg-white/70 dark:bg-slate-900/40 p-4">
+                                <p className="text-xs uppercase tracking-[0.35em] text-slate-400 mb-2 flex items-center gap-2">
+                                    <Clock className="w-4 h-4" /> Workday hours
+                                </p>
+                                <p className="text-sm text-slate-500 mb-4">
+                                    Used to convert Tracker durations with day/week units into hours.
+                                </p>
+                                <div className="grid grid-cols-4 gap-3">
+                                    {WORKDAY_HOURS_OPTIONS.map((value) => (
+                                        <button
+                                            key={value}
+                                            disabled={!config || savingWorkdayHours}
+                                            onClick={() => handleWorkdayHoursChange(value)}
+                                            className={clsx(
+                                                "px-3 py-2 rounded-2xl text-sm font-semibold border transition-colors",
+                                                workdayHours === value
+                                                    ? "bg-blue-500 text-white border-blue-500 shadow"
+                                                    : "bg-white/70 dark:bg-slate-900/40 text-slate-600 dark:text-slate-300 border-white/70 dark:border-slate-800/60"
+                                            )}
+                                        >
+                                            {value} h
+                                        </button>
+                                    ))}
+                                </div>
+                                {savingWorkdayHours && (
+                                    <p className="text-xs text-slate-400 mt-3 flex items-center gap-2">
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Saving workday hours...
+                                    </p>
+                                )}
+                                {workdayHoursError && (
+                                    <p className="text-xs text-red-500 mt-2">{workdayHoursError}</p>
+                                )}
+                            </div>
+
+                            <div className="rounded-2xl border border-white/60 dark:border-slate-800/60 bg-white/70 dark:bg-slate-900/40 p-4">
+                                <p className="text-xs uppercase tracking-[0.35em] text-slate-400 mb-2 flex items-center gap-2">
+                                    <Clock className="w-4 h-4" /> Workday schedule
+                                </p>
+                                <p className="text-sm text-slate-500 mb-4">
+                                    Configure your workday start/end.
+                                </p>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.25em] text-slate-400">
+                                        Start
+                                        <input
+                                            type="time"
+                                            value={workdayStartTime}
+                                            onChange={(event) => {
+                                                setWorkdayScheduleError(null);
+                                                setWorkdayStartTime(event.target.value);
+                                            }}
+                                            className="px-3 py-2 rounded-xl text-sm font-semibold border bg-white/80 dark:bg-slate-900/40 text-slate-700 dark:text-slate-200 border-white/70 dark:border-slate-800/60"
+                                        />
+                                    </label>
+                                    <label className="flex flex-col gap-1 text-xs uppercase tracking-[0.25em] text-slate-400">
+                                        End
+                                        <input
+                                            type="time"
+                                            value={workdayEndTime}
+                                            onChange={(event) => {
+                                                setWorkdayScheduleError(null);
+                                                setWorkdayEndTime(event.target.value);
+                                            }}
+                                            className="px-3 py-2 rounded-xl text-sm font-semibold border bg-white/80 dark:bg-slate-900/40 text-slate-700 dark:text-slate-200 border-white/70 dark:border-slate-800/60"
+                                        />
+                                    </label>
+                                </div>
+
+                                <div className="mt-4 flex items-center justify-between gap-3">
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                                        Expected duration: {workdayHours}h
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleWorkdayScheduleSave()}
+                                        disabled={!config || savingWorkdaySchedule}
+                                        className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-semibold disabled:opacity-60"
+                                    >
+                                        {savingWorkdaySchedule && <Loader2 className="w-4 h-4 animate-spin" />}
+                                        Save schedule
+                                    </button>
+                                </div>
+
+                                {workdayScheduleError && (
+                                    <p className="text-xs text-red-500 mt-2">{workdayScheduleError}</p>
                                 )}
                             </div>
                         </section>

@@ -12,6 +12,10 @@ pub struct Issue {
     pub status: Option<IssueFieldRef>,
     #[serde(default)]
     pub priority: Option<IssueFieldRef>,
+    #[serde(default)]
+    pub spent: Option<Value>,
+    #[serde(default)]
+    pub time_spent: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

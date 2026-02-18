@@ -11,6 +11,7 @@ export interface Issue {
     description: string;
     status: { key: string; display: string };
     priority: { key: string; display: string };
+    tracked_seconds?: number | null;
 }
 
 type IssuePageResponse = {
@@ -44,6 +45,9 @@ export interface TimerState {
 
 export interface Config {
     timer_notification_interval: number;
+    workday_hours: number;
+    workday_start_time: string;
+    workday_end_time: string;
 }
 
 export interface ClientCredentialsInfo {
@@ -63,6 +67,41 @@ export interface Attachment {
     name: string;
     url: string;
     mime_type?: string;
+}
+
+export interface WorklogEntry {
+    id: string;
+    date: string;
+    duration_seconds: number;
+    comment: string;
+    author: string;
+}
+
+export interface ChecklistItem {
+    id: string;
+    text: string;
+    checked: boolean;
+    assignee?: string | null;
+    deadline?: string | null;
+    deadline_type?: string | null;
+    is_exceeded?: boolean | null;
+    item_type?: string | null;
+}
+
+export interface ChecklistItemCreatePayload {
+    text: string;
+    checked?: boolean;
+    assignee?: string | null;
+    deadline?: string | null;
+    deadline_type?: string | null;
+}
+
+export interface ChecklistItemUpdatePayload {
+    text?: string;
+    checked?: boolean;
+    assignee?: string | null;
+    deadline?: string | null;
+    deadline_type?: string | null;
 }
 
 export interface Transition {
@@ -111,9 +150,13 @@ let profilePromise: Promise<UserProfile> | null = null;
 
 let cachedConfig: Config | null = null;
 let configPromise: Promise<Config> | null = null;
+const CONFIG_UPDATED_EVENT = "ytracker:config-updated";
 
 const normalizeConfig = (data: Config): Config => ({
     timer_notification_interval: data.timer_notification_interval,
+    workday_hours: data.workday_hours,
+    workday_start_time: data.workday_start_time,
+    workday_end_time: data.workday_end_time,
 });
 
 const fetchConfigCached = async (force = false): Promise<Config> => {
@@ -166,7 +209,9 @@ type CacheEntry<T> = { data: T; timestamp: number };
 const detailCache = {
     comments: new Map<string, CacheEntry<Comment[]>>(),
     attachments: new Map<string, CacheEntry<Attachment[]>>(),
-    transitions: new Map<string, CacheEntry<Transition[]>>()
+    transitions: new Map<string, CacheEntry<Transition[]>>(),
+    worklogs: new Map<string, CacheEntry<WorklogEntry[]>>(),
+    checklist: new Map<string, CacheEntry<ChecklistItem[]>>()
 };
 
 const DEFAULT_ISSUE_QUERY_KEY = "__default__";
@@ -358,10 +403,12 @@ const setCache = <T>(map: Map<string, CacheEntry<T>>, key: string, data: T) => {
     map.set(key, { data, timestamp: Date.now() });
 };
 
-const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "all") => {
+const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "worklogs" | "checklist" | "all") => {
     if (type === "comments" || type === "all") detailCache.comments.delete(issueKey);
     if (type === "attachments" || type === "all") detailCache.attachments.delete(issueKey);
     if (type === "transitions" || type === "all") detailCache.transitions.delete(issueKey);
+    if (type === "worklogs" || type === "all") detailCache.worklogs.delete(issueKey);
+    if (type === "checklist" || type === "all") detailCache.checklist.delete(issueKey);
 };
 
 const fetchWithCache = async <T>(
@@ -385,6 +432,8 @@ const getCachedDetails = (issueKey: string) => ({
     comments: getFreshCache(detailCache.comments, issueKey) ?? null,
     attachments: getFreshCache(detailCache.attachments, issueKey) ?? null,
     transitions: getFreshCache(detailCache.transitions, issueKey) ?? null,
+    worklogs: getFreshCache(detailCache.worklogs, issueKey) ?? null,
+    checklist: getFreshCache(detailCache.checklist, issueKey) ?? null,
 });
 
 export function useIssueDetails() {
@@ -437,6 +486,19 @@ export function useIssueDetails() {
         );
     };
 
+    const getIssueWorklogs = async (issueKey: string, options?: { forceRefresh?: boolean }) => {
+        return fetchWithCache(
+            detailCache.worklogs,
+            issueKey,
+            () => invoke<WorklogEntry[]>("get_issue_worklogs", { issueKey }),
+            options?.forceRefresh
+        );
+    };
+
+    const getTodayLoggedSecondsForIssues = useCallback(async (issueKeys: string[]) => {
+        return invoke<number>("get_today_logged_seconds_for_issues", { issueKeys });
+    }, []);
+
     const executeTransition = async (issueKey: string, transitionId: string, comment?: string, resolution?: string) => {
         const result = await invoke("execute_transition", { issueKey, transitionId, comment, resolution });
         invalidateCache(issueKey, "transitions");
@@ -483,6 +545,35 @@ export function useIssueDetails() {
         return resolutionsPromise;
     };
 
+    const getChecklist = async (issueKey: string, options?: { forceRefresh?: boolean }) => {
+        return fetchWithCache(
+            detailCache.checklist,
+            issueKey,
+            () => invoke<ChecklistItem[]>("get_checklist", { issueKey }),
+            options?.forceRefresh
+        );
+    };
+
+    const addChecklistItem = async (issueKey: string, item: ChecklistItemCreatePayload) => {
+        await invoke("add_checklist_item", { issueKey, item });
+        invalidateCache(issueKey, "checklist");
+    };
+
+    const editChecklistItem = async (issueKey: string, itemId: string, update: ChecklistItemUpdatePayload) => {
+        await invoke("edit_checklist_item", { issueKey, itemId, update });
+        invalidateCache(issueKey, "checklist");
+    };
+
+    const deleteChecklist = async (issueKey: string) => {
+        await invoke("delete_checklist", { issueKey });
+        invalidateCache(issueKey, "checklist");
+    };
+
+    const deleteChecklistItem = async (issueKey: string, itemId: string) => {
+        await invoke("delete_checklist_item", { issueKey, itemId });
+        invalidateCache(issueKey, "checklist");
+    };
+
     return {
         getIssue,
         getComments,
@@ -493,11 +584,18 @@ export function useIssueDetails() {
         previewAttachment,
         previewInlineImage,
         getTransitions,
+        getIssueWorklogs,
+        getTodayLoggedSecondsForIssues,
         executeTransition,
         getCachedDetails,
         clearIssueCache,
         getStatuses,
         getResolutions,
+        getChecklist,
+        addChecklistItem,
+        editChecklistItem,
+        deleteChecklist,
+        deleteChecklistItem,
     };
 }
 
@@ -747,11 +845,36 @@ export function useConfig() {
         };
     }, []);
 
+    useEffect(() => {
+        if (typeof window === "undefined") {
+            return;
+        }
+
+        const handleConfigUpdated = (event: Event) => {
+            const customEvent = event as CustomEvent<Config | null>;
+            if (customEvent.detail === null) {
+                setConfig(null);
+                return;
+            }
+            if (customEvent.detail) {
+                setConfig(customEvent.detail);
+            }
+        };
+
+        window.addEventListener(CONFIG_UPDATED_EVENT, handleConfigUpdated as EventListener);
+        return () => {
+            window.removeEventListener(CONFIG_UPDATED_EVENT, handleConfigUpdated as EventListener);
+        };
+    }, []);
+
     const save = async (newConfig: Config) => {
         const normalized = normalizeConfig(newConfig);
         await invoke("save_config", { config: normalized });
         cachedConfig = normalized;
         setConfig(normalized);
+        if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent<Config>(CONFIG_UPDATED_EVENT, { detail: normalized }));
+        }
     };
 
     const refresh = async (force = false) => {
@@ -820,6 +943,9 @@ export function useAccount() {
             profilePromise = null;
             cachedConfig = null;
             configPromise = null;
+            if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent<Config | null>(CONFIG_UPDATED_EVENT, { detail: null }));
+            }
         } catch (err) {
             setError(String(err));
             throw err;

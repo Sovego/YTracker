@@ -3,6 +3,8 @@ import {
   useTracker,
   Issue,
   useTimer,
+  useConfig,
+  useIssueDetails,
   checkSessionExists,
   useFilterCatalogs,
   type IssueSearchOptions,
@@ -13,7 +15,7 @@ import { IssueDetail } from "./components/IssueDetail";
 import { Login } from "./components/Login";
 import { TimerWidget } from "./components/Timer";
 import { WorkLogDialog } from "./components/WorkLogDialog";
-import { Search, RefreshCw, Settings2 } from "lucide-react";
+import { Search, RefreshCw, Settings2, ChevronDown } from "lucide-react";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -21,7 +23,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 import { FilterSelect, type FilterOption } from "./components/FilterSelect";
-import { getErrorSummary } from "./utils";
+import { formatDurationHuman, getErrorSummary } from "./utils";
 
 const BASE_RESOLUTION_FILTER = "empty()";
 const SELF_ASSIGNEE_VALUE = "me()";
@@ -31,11 +33,25 @@ type TimerStoppedPayload = {
   elapsed: number;
 };
 
+const isAuthRelatedError = (message: string) => {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("unauthorized") ||
+    normalized.includes("forbidden") ||
+    normalized.includes("access denied") ||
+    normalized.includes("not authenticated") ||
+    normalized.includes("sign in again") ||
+    normalized.includes("failed to load stored token")
+  );
+};
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
   const [authChecked, setAuthChecked] = useState(false);
   const { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore } = useTracker();
   const { state: timerState, start: invokeStartTimer, stop: invokeStopTimer } = useTimer();
+  const { config } = useConfig();
+  const { getTodayLoggedSecondsForIssues } = useIssueDetails();
   const {
     queues,
     projects,
@@ -55,15 +71,21 @@ function App() {
   const [workLogData, setWorkLogData] = useState<{ key: string, elapsed: number } | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const [loggedTodaySeconds, setLoggedTodaySeconds] = useState(0);
+  const [loadingTodayProgress, setLoadingTodayProgress] = useState(false);
   const [pendingRestart, setPendingRestart] = useState<{ key: string; summary: string } | null>(null);
   const [detailKey, setDetailKey] = useState<string>("empty");
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreInFlightRef = useRef(false);
   const lastScrollTopRef = useRef(0);
+  const progressRefreshInFlightRef = useRef(false);
   const isNarrowLayout = useMediaQuery("(max-width: 1023px)");
   const showDetailPlaceholder = loading && issues.length === 0;
 
-  const showDetailOverlay = isNarrowLayout && !!selectedIssue;
+  useEffect(() => {
+    setFiltersExpanded(!isNarrowLayout);
+  }, [isNarrowLayout]);
 
   const queueOptions = useMemo<FilterOption[]>(() => {
     return queues
@@ -146,25 +168,68 @@ function App() {
     });
   }, [issues, normalizedTextFilter]);
 
-  useEffect(() => {
-    if (!showDetailOverlay || typeof window === "undefined") return;
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [showDetailOverlay]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-
-    const originalOverflow = document.documentElement.style.overflow;
-    if (showDetailOverlay) {
-      document.documentElement.style.overflow = "hidden";
-    } else {
-      document.documentElement.style.overflow = "";
+  const refreshTodayProgress = useCallback(async (options?: { showLoading?: boolean }) => {
+    if (!isAuthenticated || issues.length === 0) {
+      setLoggedTodaySeconds(0);
+      setLoadingTodayProgress(false);
+      return;
     }
 
+    if (progressRefreshInFlightRef.current) {
+      return;
+    }
+
+    progressRefreshInFlightRef.current = true;
+
+    const showLoading = options?.showLoading ?? true;
+    let loadingTimer: ReturnType<typeof setTimeout> | null = null;
+    if (showLoading) {
+      loadingTimer = setTimeout(() => {
+        setLoadingTodayProgress(true);
+      }, 250);
+    }
+
+    const keys = Array.from(new Set(issues.map((issue) => issue.key)));
+    try {
+      const total = await getTodayLoggedSecondsForIssues(keys);
+      setLoggedTodaySeconds(total);
+    } catch {
+      // Keep previous value on transient failures instead of dropping to zero.
+    } finally {
+      if (loadingTimer) {
+        clearTimeout(loadingTimer);
+      }
+      if (showLoading) {
+        setLoadingTodayProgress(false);
+      }
+      progressRefreshInFlightRef.current = false;
+    }
+  }, [isAuthenticated, issues, getTodayLoggedSecondsForIssues]);
+
+  useEffect(() => {
+    void refreshTodayProgress({ showLoading: true });
+  }, [refreshTodayProgress]);
+
+  useEffect(() => {
+    if (!isAuthenticated || issues.length === 0 || typeof window === "undefined") {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void refreshTodayProgress({ showLoading: false });
+    }, 60_000);
+
     return () => {
-      document.documentElement.style.overflow = originalOverflow;
+      window.clearInterval(interval);
     };
-  }, [showDetailOverlay]);
+  }, [isAuthenticated, issues.length, refreshTodayProgress]);
+
+  const workdayHours = Math.min(24, Math.max(1, config?.workday_hours ?? 8));
+  const targetTodaySeconds = workdayHours * 3600;
+  const todayTrackedSeconds = loggedTodaySeconds + (timerState.active ? timerState.elapsed : 0);
+  const todayTrackedPercent = targetTodaySeconds > 0
+    ? Math.min(100, Math.round((todayTrackedSeconds / targetTodaySeconds) * 100))
+    : 0;
 
   // Initial check - ensure we have a session before fetching issues.
   useEffect(() => {
@@ -285,14 +350,7 @@ function App() {
       return;
     }
 
-    const normalizedError = error.toLowerCase();
-    if (
-      normalizedError.includes("auth") ||
-      normalizedError.includes("token") ||
-      normalizedError.includes("unauthorized") ||
-      normalizedError.includes("not authenticated") ||
-      normalizedError.includes("sign in again")
-    ) {
+    if (isAuthRelatedError(error)) {
       setIsAuthenticated(false);
     }
   }, [error]);
@@ -360,6 +418,11 @@ function App() {
       });
       setPendingRestart(null);
     }
+  };
+
+  const handleWorkLogSuccess = () => {
+    refreshActiveIssues();
+    dismissWorkLogDialog();
   };
 
   const handleStopTimer = async () => {
@@ -458,7 +521,7 @@ function App() {
       <div className="glass-panel app-shell flex w-full min-h-screen lg:h-screen overflow-visible lg:overflow-hidden">
         <div className="flex flex-1 flex-col lg:flex-row min-h-0 w-full">
           {/* Sidebar */}
-          <aside className="w-full lg:w-[360px] border-b lg:border-b-0 lg:border-r border-white/60 dark:border-slate-800/70 bg-gradient-to-b from-white/95 via-white/75 to-white/60 dark:from-slate-900/80 dark:via-slate-900/60 dark:to-slate-900/40 flex flex-col flex-shrink-0 min-h-[260px]">
+          <aside className={`${isNarrowLayout && selectedIssue ? "hidden lg:flex" : "flex"} w-full lg:w-[360px] border-b lg:border-b-0 lg:border-r border-white/60 dark:border-slate-800/70 bg-gradient-to-b from-white/95 via-white/75 to-white/60 dark:from-slate-900/80 dark:via-slate-900/60 dark:to-slate-900/40 flex-col flex-shrink-0 min-h-[260px]`}>
             <div className="px-6 pt-8 pb-6 border-b border-white/60 dark:border-slate-800/70">
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -478,69 +541,100 @@ function App() {
             </div>
 
             <div className="px-6 py-4 border-b border-white/50 dark:border-slate-800/60 space-y-4">
-              <form onSubmit={handleLocalSearchSubmit} className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Filter within loaded issues..."
-                  value={textFilter}
-                  onChange={(e) => setTextFilter(e.target.value)}
-                  className="w-full pl-11 pr-4 py-3 rounded-xl bg-white/70 dark:bg-slate-900/60 border border-white/60 dark:border-slate-800/70 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/60 shadow-inner"
-                />
-              </form>
-
-              <div className="space-y-3">
-                <div className="flex flex-wrap gap-3">
-                  <div className="flex-1 min-w-[180px]">
-                    <FilterSelect
-                      label="Assignees"
-                      options={userOptions}
-                      selected={assigneeFilters}
-                      onChange={setAssigneeFilters}
-                      emptyLabel="Any assignee"
-                      loading={catalogsLoading}
-                    />
-                  </div>
-                  <div className="flex-1 min-w-[160px]">
-                    <FilterSelect
-                      label="Queues"
-                      options={queueOptions}
-                      selected={queueFilters}
-                      onChange={setQueueFilters}
-                      emptyLabel="All queues"
-                      loading={catalogsLoading}
-                    />
-                  </div>
-                  <div className="flex-1 min-w-[160px]">
-                    <FilterSelect
-                      label="Projects"
-                      options={projectOptions}
-                      selected={projectFilters}
-                      onChange={setProjectFilters}
-                      emptyLabel="All projects"
-                      loading={catalogsLoading}
-                    />
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto">
-                    <button
-                      type="button"
-                      onClick={() => void handleApplyFilters()}
-                      disabled={!hasPendingFilterChanges || loading}
-                      className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border text-sm font-semibold transition ${!hasPendingFilterChanges || loading
-                        ? "bg-white/40 dark:bg-slate-900/30 border-white/40 dark:border-slate-800/40 text-slate-400"
-                        : "bg-blue-600 text-white border-blue-500 hover:bg-blue-500"
-                        }`}
-                    >
-                      Apply
-                    </button>
-                    {hasPendingFilterChanges ? (
-                      <span className="text-[11px] uppercase tracking-[0.3em] text-amber-500">Pending</span>
-                    ) : (
-                      <span className="text-[11px] uppercase tracking-[0.3em] text-emerald-500">Synced</span>
-                    )}
-                  </div>
+              <div className="rounded-2xl border border-white/60 dark:border-slate-800/60 bg-white/60 dark:bg-slate-900/40 px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px] uppercase tracking-[0.35em] text-slate-400">Today Progress</p>
+                  <span className="text-xs font-semibold text-slate-500 dark:text-slate-300">
+                    {formatDurationHuman(todayTrackedSeconds)} / {formatDurationHuman(targetTodaySeconds)}
+                  </span>
                 </div>
+                <div className="mt-3 h-2 rounded-full bg-slate-200/80 dark:bg-slate-800/80 overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 transition-[width]"
+                    style={{ width: `${todayTrackedPercent}%` }}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                  {loadingTodayProgress ? "Updating tracked time..." : `Goal: ${workdayHours}h workday`}
+                </p>
               </div>
+
+              <button
+                type="button"
+                onClick={() => setFiltersExpanded((value) => !value)}
+                className="w-full inline-flex items-center justify-between rounded-xl border border-white/60 dark:border-slate-800/70 bg-white/60 dark:bg-slate-900/40 px-4 py-3 text-sm font-semibold text-slate-600 dark:text-slate-300"
+              >
+                <span>Filters</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${filtersExpanded ? "rotate-180" : ""}`} />
+              </button>
+
+              {filtersExpanded && (
+                <>
+                  <form onSubmit={handleLocalSearchSubmit} className="relative">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Filter within loaded issues..."
+                      value={textFilter}
+                      onChange={(e) => setTextFilter(e.target.value)}
+                      className="w-full pl-11 pr-4 py-3 rounded-xl bg-white/70 dark:bg-slate-900/60 border border-white/60 dark:border-slate-800/70 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/60 shadow-inner"
+                    />
+                  </form>
+
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap gap-3">
+                      <div className="flex-1 min-w-[180px]">
+                        <FilterSelect
+                          label="Assignees"
+                          options={userOptions}
+                          selected={assigneeFilters}
+                          onChange={setAssigneeFilters}
+                          emptyLabel="Any assignee"
+                          loading={catalogsLoading}
+                        />
+                      </div>
+                      <div className="flex-1 min-w-[160px]">
+                        <FilterSelect
+                          label="Queues"
+                          options={queueOptions}
+                          selected={queueFilters}
+                          onChange={setQueueFilters}
+                          emptyLabel="All queues"
+                          loading={catalogsLoading}
+                        />
+                      </div>
+                      <div className="flex-1 min-w-[160px]">
+                        <FilterSelect
+                          label="Projects"
+                          options={projectOptions}
+                          selected={projectFilters}
+                          onChange={setProjectFilters}
+                          emptyLabel="All projects"
+                          loading={catalogsLoading}
+                        />
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto">
+                        <button
+                          type="button"
+                          onClick={() => void handleApplyFilters()}
+                          disabled={!hasPendingFilterChanges || loading}
+                          className={`flex-1 sm:flex-none inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl border text-sm font-semibold transition ${!hasPendingFilterChanges || loading
+                            ? "bg-white/40 dark:bg-slate-900/30 border-white/40 dark:border-slate-800/40 text-slate-400"
+                            : "bg-blue-600 text-white border-blue-500 hover:bg-blue-500"
+                            }`}
+                        >
+                          Apply
+                        </button>
+                        {hasPendingFilterChanges ? (
+                          <span className="text-[11px] uppercase tracking-[0.3em] text-amber-500">Pending</span>
+                        ) : (
+                          <span className="text-[11px] uppercase tracking-[0.3em] text-emerald-500">Synced</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
 
               <div className="flex items-center justify-between flex-wrap gap-3">
                 <div>
@@ -621,11 +715,23 @@ function App() {
           </aside>
 
           {/* Main Content */}
-          <main className={`${isNarrowLayout && !selectedIssue ? "hidden lg:block" : "flex-1"} relative bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 ${showDetailOverlay ? "overflow-hidden" : "overflow-auto lg:overflow-hidden"}`}>
+          <main className={`${isNarrowLayout && !selectedIssue ? "hidden lg:flex" : "flex-1"} relative flex flex-col bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 overflow-hidden`}>
             {showDetailPlaceholder ? (
               <IssueDetailPlaceholder />
-            ) : (!isNarrowLayout || !selectedIssue) && (
-              <div key={detailKey} className="h-full animate-fadeUp">
+            ) : (
+              <>
+                {isNarrowLayout && selectedIssue && (
+                  <div className="p-4 border-b border-white/60 dark:border-slate-800/70 flex items-center justify-between lg:hidden">
+                    <button
+                      onClick={() => setSelectedIssue(null)}
+                      className="px-3 py-2 rounded-full bg-slate-200/80 dark:bg-slate-800/80 text-slate-700 dark:text-slate-100 text-sm font-semibold"
+                    >
+                      ← Back
+                    </button>
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Details</p>
+                  </div>
+                )}
+                <div key={detailKey} className="flex-1 min-h-0 animate-fadeUp">
                 {selectedIssue ? (
                   <IssueDetail
                     issue={selectedIssue}
@@ -643,32 +749,8 @@ function App() {
                     <p className="text-sm text-slate-500 mt-2">Choose one from the left pane to begin.</p>
                   </div>
                 )}
-              </div>
-            )}
-
-            {showDetailOverlay && selectedIssue && (
-              <div className="fixed inset-0 z-50 bg-gradient-to-br from-white/95 via-white/90 to-white/85 dark:from-slate-950/95 dark:via-slate-950/90 dark:to-slate-950/85 backdrop-blur-2xl lg:hidden animate-fadeUp">
-                <div className="h-full flex flex-col">
-                  <div className="p-4 border-b border-white/60 dark:border-slate-800/70 flex items-center justify-between">
-                    <button
-                      onClick={() => setSelectedIssue(null)}
-                      className="px-3 py-2 rounded-full bg-slate-200/80 dark:bg-slate-800/80 text-slate-700 dark:text-slate-100 text-sm font-semibold"
-                    >
-                      ← Back
-                    </button>
-                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Details</p>
-                  </div>
-                  <div className="flex-1 overflow-y-auto">
-                    <IssueDetail
-                      issue={selectedIssue}
-                      timerState={timerState}
-                      onStart={handleStartTimer}
-                      onStop={handleStopTimer}
-                      onIssueUpdate={refreshActiveIssues}
-                    />
-                  </div>
                 </div>
-              </div>
+              </>
             )}
           </main>
         </div>
@@ -681,7 +763,7 @@ function App() {
           issueKey={workLogData.key}
           durationSeconds={workLogData.elapsed}
           onClose={dismissWorkLogDialog}
-          onSuccess={dismissWorkLogDialog}
+          onSuccess={handleWorkLogSuccess}
         />
       )}
 
