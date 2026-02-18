@@ -63,8 +63,8 @@ jobs:
           YTRACKER_CLIENT_SECRET: ${{ secrets.YTRACKER_CLIENT_SECRET }}
         with:
           projectPath: ytracker-tauri
-          tagName: app-v__VERSION__
-          releaseName: 'App v__VERSION__'
+          tagName: YTracker-v__VERSION__
+          releaseName: 'YTracker v__VERSION__'
           releaseBody: 'See the assets to download this version and install.'
           releaseDraft: true
           prerelease: false
