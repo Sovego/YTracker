@@ -2,15 +2,37 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+fn default_workday_hours() -> u8 {
+    8
+}
+
+fn default_workday_start_time() -> String {
+    "09:00".to_string()
+}
+
+fn default_workday_end_time() -> String {
+    "17:00".to_string()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct Config {
     pub timer_notification_interval: u32,
+    #[serde(default = "default_workday_hours")]
+    pub workday_hours: u8,
+    #[serde(default = "default_workday_start_time")]
+    pub workday_start_time: String,
+    #[serde(default = "default_workday_end_time")]
+    pub workday_end_time: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             timer_notification_interval: 15,
+            workday_hours: default_workday_hours(),
+            workday_start_time: default_workday_start_time(),
+            workday_end_time: default_workday_end_time(),
         }
     }
 }

@@ -1,0 +1,2 @@
+## Yandex tracker API written on Rust
+This crate provides a Rust client for the Yandex Tracker API, enabling seamless integration with the Yandex Tracker service. It includes functionality for authentication, issue management, and other common operations supported by the Tracker API.

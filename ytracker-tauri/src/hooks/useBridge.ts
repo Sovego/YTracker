@@ -11,6 +11,7 @@ export interface Issue {
     description: string;
     status: { key: string; display: string };
     priority: { key: string; display: string };
+    tracked_seconds?: number | null;
 }
 
 type IssuePageResponse = {
@@ -44,6 +45,9 @@ export interface TimerState {
 
 export interface Config {
     timer_notification_interval: number;
+    workday_hours: number;
+    workday_start_time: string;
+    workday_end_time: string;
 }
 
 export interface ClientCredentialsInfo {
@@ -63,6 +67,14 @@ export interface Attachment {
     name: string;
     url: string;
     mime_type?: string;
+}
+
+export interface WorklogEntry {
+    id: string;
+    date: string;
+    duration_seconds: number;
+    comment: string;
+    author: string;
 }
 
 export interface Transition {
@@ -111,9 +123,13 @@ let profilePromise: Promise<UserProfile> | null = null;
 
 let cachedConfig: Config | null = null;
 let configPromise: Promise<Config> | null = null;
+const CONFIG_UPDATED_EVENT = "ytracker:config-updated";
 
 const normalizeConfig = (data: Config): Config => ({
     timer_notification_interval: data.timer_notification_interval,
+    workday_hours: Math.min(24, Math.max(1, data.workday_hours ?? 8)),
+    workday_start_time: data.workday_start_time || "09:00",
+    workday_end_time: data.workday_end_time || "17:00",
 });
 
 const fetchConfigCached = async (force = false): Promise<Config> => {
@@ -166,7 +182,8 @@ type CacheEntry<T> = { data: T; timestamp: number };
 const detailCache = {
     comments: new Map<string, CacheEntry<Comment[]>>(),
     attachments: new Map<string, CacheEntry<Attachment[]>>(),
-    transitions: new Map<string, CacheEntry<Transition[]>>()
+    transitions: new Map<string, CacheEntry<Transition[]>>(),
+    worklogs: new Map<string, CacheEntry<WorklogEntry[]>>()
 };
 
 const DEFAULT_ISSUE_QUERY_KEY = "__default__";
@@ -358,10 +375,11 @@ const setCache = <T>(map: Map<string, CacheEntry<T>>, key: string, data: T) => {
     map.set(key, { data, timestamp: Date.now() });
 };
 
-const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "all") => {
+const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "worklogs" | "all") => {
     if (type === "comments" || type === "all") detailCache.comments.delete(issueKey);
     if (type === "attachments" || type === "all") detailCache.attachments.delete(issueKey);
     if (type === "transitions" || type === "all") detailCache.transitions.delete(issueKey);
+    if (type === "worklogs" || type === "all") detailCache.worklogs.delete(issueKey);
 };
 
 const fetchWithCache = async <T>(
@@ -385,6 +403,7 @@ const getCachedDetails = (issueKey: string) => ({
     comments: getFreshCache(detailCache.comments, issueKey) ?? null,
     attachments: getFreshCache(detailCache.attachments, issueKey) ?? null,
     transitions: getFreshCache(detailCache.transitions, issueKey) ?? null,
+    worklogs: getFreshCache(detailCache.worklogs, issueKey) ?? null,
 });
 
 export function useIssueDetails() {
@@ -433,6 +452,15 @@ export function useIssueDetails() {
             detailCache.transitions,
             issueKey,
             () => invoke<Transition[]>("get_transitions", { issueKey }),
+            options?.forceRefresh
+        );
+    };
+
+    const getIssueWorklogs = async (issueKey: string, options?: { forceRefresh?: boolean }) => {
+        return fetchWithCache(
+            detailCache.worklogs,
+            issueKey,
+            () => invoke<WorklogEntry[]>("get_issue_worklogs", { issueKey }),
             options?.forceRefresh
         );
     };
@@ -493,6 +521,7 @@ export function useIssueDetails() {
         previewAttachment,
         previewInlineImage,
         getTransitions,
+        getIssueWorklogs,
         executeTransition,
         getCachedDetails,
         clearIssueCache,
@@ -747,11 +776,32 @@ export function useConfig() {
         };
     }, []);
 
+    useEffect(() => {
+        if (typeof window === "undefined") {
+            return;
+        }
+
+        const handleConfigUpdated = (event: Event) => {
+            const customEvent = event as CustomEvent<Config>;
+            if (customEvent.detail) {
+                setConfig(customEvent.detail);
+            }
+        };
+
+        window.addEventListener(CONFIG_UPDATED_EVENT, handleConfigUpdated as EventListener);
+        return () => {
+            window.removeEventListener(CONFIG_UPDATED_EVENT, handleConfigUpdated as EventListener);
+        };
+    }, []);
+
     const save = async (newConfig: Config) => {
         const normalized = normalizeConfig(newConfig);
         await invoke("save_config", { config: normalized });
         cachedConfig = normalized;
         setConfig(normalized);
+        if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent<Config>(CONFIG_UPDATED_EVENT, { detail: normalized }));
+        }
     };
 
     const refresh = async (force = false) => {
@@ -820,6 +870,9 @@ export function useAccount() {
             profilePromise = null;
             cachedConfig = null;
             configPromise = null;
+            if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent(CONFIG_UPDATED_EVENT));
+            }
         } catch (err) {
             setError(String(err));
             throw err;

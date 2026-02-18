@@ -7,6 +7,7 @@ pub struct Issue {
     pub description: String,
     pub status: Status,
     pub priority: Priority,
+    pub tracked_seconds: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -62,4 +63,13 @@ pub struct UserProfile {
     pub login: Option<String>,
     pub email: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct WorklogEntry {
+    pub id: String,
+    pub date: String,
+    pub duration_seconds: u64,
+    pub comment: String,
+    pub author: String,
 }

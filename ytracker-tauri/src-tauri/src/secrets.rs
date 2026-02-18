@@ -8,6 +8,11 @@ use ytracker_api::rate_limiter::RateLimiter;
 
 const KEYRING_ACCOUNT: &str = "session";
 const KEYRING_FALLBACK_SERVICE: &str = "ru.sovego.ytracker-tauri";
+const LEGACY_KEYRING_SERVICES: [&str; 3] = [
+    "ru.sovego.ytracker-tauri",
+    "ru.sovego.ytracker",
+    "ru.sovego.YTracker",
+];
 
 #[derive(Debug, Clone)]
 pub struct ClientCredentials {
@@ -135,16 +140,35 @@ impl SecretsManager {
     }
 
     fn load_session_from_store(&self) -> Result<Option<SessionToken>, String> {
-        let entry = self.session_entry()?;
-        match entry.get_password() {
-            Ok(secret) => {
-                let token = serde_json::from_str(&secret)
-                    .map_err(|err| format!("Failed to decode stored session: {err}"))?;
-                Ok(Some(token))
-            }
-            Err(KeyringError::NoEntry) => Ok(None),
-            Err(err) => Err(format!("Failed to read session from keyring: {err}")),
+        let current_service = self.inner.keyring_service.as_str();
+        let current_entry = self.session_entry_for_service(current_service)?;
+        if let Some(session) = self.read_session_from_entry(&current_entry, current_service)? {
+            return Ok(Some(session));
         }
+
+        for service in LEGACY_KEYRING_SERVICES {
+            if service == current_service {
+                continue;
+            }
+
+            let entry = match self.session_entry_for_service(service) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let legacy_session = match self.read_session_from_entry(&entry, service) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            if let Some(session) = legacy_session {
+                self.persist_session(Some(&session))?;
+                let _ = entry.delete_credential();
+                return Ok(Some(session));
+            }
+        }
+
+        Ok(None)
     }
 
     fn persist_session(&self, session: Option<&SessionToken>) -> Result<(), String> {
@@ -165,8 +189,31 @@ impl SecretsManager {
     }
 
     fn session_entry(&self) -> Result<Entry, String> {
-        Entry::new(&self.inner.keyring_service, KEYRING_ACCOUNT)
-            .map_err(|err| format!("Failed to open keyring entry: {err}"))
+        self.session_entry_for_service(&self.inner.keyring_service)
+    }
+
+    fn session_entry_for_service(&self, service: &str) -> Result<Entry, String> {
+        Entry::new(service, KEYRING_ACCOUNT)
+            .map_err(|err| format!("Failed to open keyring entry for '{service}': {err}"))
+    }
+
+    fn read_session_from_entry(
+        &self,
+        entry: &Entry,
+        service: &str,
+    ) -> Result<Option<SessionToken>, String> {
+        match entry.get_password() {
+            Ok(secret) => {
+                let token = serde_json::from_str(&secret).map_err(|err| {
+                    format!("Failed to decode stored session from '{service}': {err}")
+                })?;
+                Ok(Some(token))
+            }
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(err) => Err(format!(
+                "Failed to read session from keyring service '{service}': {err}"
+            )),
+        }
     }
 }
 

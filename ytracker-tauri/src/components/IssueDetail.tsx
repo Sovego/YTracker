@@ -1,4 +1,4 @@
-import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity } from "../hooks/useBridge";
+import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity, WorklogEntry } from "../hooks/useBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Play, Square, Edit2, Save, X, Download, MessageSquare, Paperclip, ChevronDown, Send, Eye, Loader2 } from "lucide-react";
@@ -121,7 +121,7 @@ interface IssueDetailProps {
 }
 
 export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate }: IssueDetailProps) {
-    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, executeTransition, getResolutions } = useIssueDetails();
+    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions } = useIssueDetails();
 
     const [comments, setComments] = useState<Comment[]>([]);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -143,6 +143,11 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
     const [editDescription, setEditDescription] = useState("");
 
     const [loadingDetails, setLoadingDetails] = useState(false);
+    const [worklogs, setWorklogs] = useState<WorklogEntry[]>([]);
+    const [worklogDialogOpen, setWorklogDialogOpen] = useState(false);
+    const [worklogLoading, setWorklogLoading] = useState(false);
+    const [worklogError, setWorklogError] = useState<string | null>(null);
+    const [visibleWorklogCount, setVisibleWorklogCount] = useState(20);
     const [previewAttachmentData, setPreviewAttachmentData] = useState<{ attachment: Attachment; dataUrl: string } | null>(null);
     const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
     const [previewError, setPreviewError] = useState<string | null>(null);
@@ -243,6 +248,14 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setTransitions([]);
         }
     }, [issue?.key, closeStatusMenu]); // Only re-run when issue key changes
+
+    useEffect(() => {
+        setWorklogs([]);
+        setWorklogDialogOpen(false);
+        setWorklogLoading(false);
+        setWorklogError(null);
+        setVisibleWorklogCount(20);
+    }, [issue?.key]);
 
     useEffect(() => {
         setInlineImages({});
@@ -464,6 +477,59 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         setPreviewError(null);
     };
 
+    const openWorklogDialog = async () => {
+        if (!activeIssue) return;
+
+        setWorklogDialogOpen(true);
+        setWorklogLoading(true);
+        setWorklogError(null);
+        setVisibleWorklogCount(20);
+        try {
+            const entries = await getIssueWorklogs(activeIssue.key, { forceRefresh: true });
+            const sorted = entries.slice().sort((a, b) => {
+                const aTime = Date.parse(a.date || "");
+                const bTime = Date.parse(b.date || "");
+                if (!Number.isNaN(aTime) && !Number.isNaN(bTime) && aTime !== bTime) {
+                    return bTime - aTime;
+                }
+                const aId = Number.parseInt(a.id, 10);
+                const bId = Number.parseInt(b.id, 10);
+                if (!Number.isNaN(aId) && !Number.isNaN(bId)) {
+                    return bId - aId;
+                }
+                return b.id.localeCompare(a.id);
+            });
+            setWorklogs(sorted);
+        } catch (err) {
+            setWorklogError(getErrorSummary(err));
+            setWorklogs([]);
+        } finally {
+            setWorklogLoading(false);
+        }
+    };
+
+    const closeWorklogDialog = () => {
+        setWorklogDialogOpen(false);
+        setWorklogError(null);
+    };
+
+    const trackedSeconds = worklogs.length > 0
+        ? worklogs.reduce((total, entry) => total + (entry.duration_seconds || 0), 0)
+        : (activeIssue?.tracked_seconds ?? 0);
+
+    const visibleWorklogs = worklogs.slice(0, visibleWorklogCount);
+
+    const formatWorklogDate = (value: string) => {
+        if (!value) {
+            return "—";
+        }
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            return value;
+        }
+        return parsed.toLocaleString();
+    };
+
     if (!issue) {
         return (
             <div className="flex items-center justify-center h-full text-slate-400">
@@ -552,6 +618,13 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                                             {activeIssue.summary}
                                         </h2>
                                     )}
+                                    <button
+                                        type="button"
+                                        onClick={() => void openWorklogDialog()}
+                                        className="inline-flex items-center gap-2 rounded-full bg-white/90 dark:bg-slate-800/90 border border-slate-300/80 dark:border-slate-600/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.25em] text-slate-700 dark:text-slate-100 hover:text-blue-600 dark:hover:text-blue-300 shadow-sm transition-colors"
+                                    >
+                                        Tracked: {formatDurationHuman(trackedSeconds)}
+                                    </button>
                                 </div>
                                 <div className="flex flex-wrap items-center justify-end gap-3">
                                     <div className="relative">
@@ -871,6 +944,76 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                             >
                                 Execute
                             </button>
+                        </div>
+                    </div>
+                </div>, document.body
+            )}
+
+            {worklogDialogOpen && typeof document !== "undefined" && createPortal(
+                <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center px-4 py-8">
+                    <div className="w-full max-w-3xl bg-white/95 dark:bg-slate-900/95 rounded-2xl shadow-2xl border border-white/70 dark:border-slate-800/70 overflow-hidden flex flex-col max-h-[90vh] transform translate-y-3 sm:translate-y-4 lg:translate-y-0 transition-transform">
+                        <div className="flex items-center justify-between px-5 py-4 border-b border-white/70 dark:border-slate-800/70">
+                            <div>
+                                <p className="text-xs uppercase tracking-[0.4em] text-slate-400">Worklogs</p>
+                                <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                                    {activeIssue.key} · Total {formatDurationHuman(trackedSeconds)}
+                                </p>
+                            </div>
+                            <button
+                                onClick={closeWorklogDialog}
+                                className="h-10 w-10 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-5 overflow-y-auto space-y-3">
+                            {worklogLoading ? (
+                                <div className="min-h-[220px] flex flex-col items-center justify-center text-slate-500 dark:text-slate-400 gap-3">
+                                    <Loader2 className="w-8 h-8 animate-spin" />
+                                    <span className="text-sm">Loading worklogs...</span>
+                                </div>
+                            ) : worklogError ? (
+                                <div className="text-sm text-red-500">{worklogError}</div>
+                            ) : visibleWorklogs.length === 0 ? (
+                                <p className="text-sm text-slate-400">No tracked work yet.</p>
+                            ) : (
+                                <>
+                                    {visibleWorklogs.map((entry) => (
+                                        <div
+                                            key={entry.id || `${entry.author}-${entry.date}`}
+                                            className="rounded-2xl border border-white/60 dark:border-slate-800/60 bg-white/70 dark:bg-slate-900/50 p-4"
+                                        >
+                                            <div className="flex flex-wrap items-center justify-between gap-3">
+                                                <span className="text-xs text-slate-500 dark:text-slate-400">
+                                                    {formatWorklogDate(entry.date)}
+                                                </span>
+                                                <span className="text-xs font-semibold rounded-full px-3 py-1 bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                                                    {formatDurationHuman(entry.duration_seconds)}
+                                                </span>
+                                            </div>
+                                            <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mt-2">
+                                                {entry.author || "Unknown"}
+                                            </p>
+                                            <p className="text-sm text-slate-600 dark:text-slate-300 mt-1 whitespace-pre-wrap">
+                                                {entry.comment?.trim() ? entry.comment : "—"}
+                                            </p>
+                                        </div>
+                                    ))}
+
+                                    {visibleWorklogCount < worklogs.length && (
+                                        <div className="pt-2 flex justify-center">
+                                            <button
+                                                type="button"
+                                                onClick={() => setVisibleWorklogCount((count) => count + 20)}
+                                                className="px-4 py-2 rounded-full text-sm font-semibold text-blue-600 hover:text-blue-500"
+                                            >
+                                                Load more
+                                            </button>
+                                        </div>
+                                    )}
+                                </>
+                            )}
                         </div>
                     </div>
                 </div>, document.body

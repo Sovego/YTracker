@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use chrono::Utc;
+use chrono::{DateTime, Local, NaiveTime, Utc};
 use directories::UserDirs;
 use log::{debug, info, warn};
 use once_cell::sync::Lazy;
@@ -36,12 +36,13 @@ use ytracker_api::{
     auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment, Issue as NativeIssue,
     IssueFieldRef as NativeIssueFieldRef, OrgType, ScrollType, SimpleEntityRaw as NativeSimpleEntity,
     TrackerClient, TrackerConfig, Transition as NativeTransition, UserProfile as NativeUserProfile,
+    WorklogEntry as NativeWorklogEntry,
 };
 
 static DURATION_TOKEN_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(\d+)\s*(w|d|h|m)").expect("invalid duration regex"));
 const DEFAULT_ISSUE_QUERY: &str = "Assignee: me() Resolution: empty()";
-const TRAY_ID: &str = "tray";
+const TRAY_ID: &str = "YTracker";
 const MENU_STOP_ID: &str = "tray_stop_timer";
 const MENU_REFRESH_ID: &str = "tray_refresh";
 const MENU_RUNNING_LABEL_ID: &str = "tray_running_label";
@@ -54,6 +55,16 @@ const MAX_TRAY_ISSUES: usize = 12;
 const ISSUE_REFRESH_INTERVAL_SECS: u64 = 300;
 const ISSUE_SCROLL_PER_PAGE: u32 = 100;
 const ISSUE_SCROLL_TTL_MILLIS: u64 = 60_000;
+const WORKDAY_MOTIVATION_PHRASES: [&str; 8] = [
+    "Small progress is still progress — you've got this.",
+    "A little more focus now will make tomorrow easier.",
+    "Keep going — your effort today matters.",
+    "One steady push and you'll close the day strong.",
+    "You're building momentum — stay with it.",
+    "Every tracked minute moves you forward.",
+    "Finish with confidence — you can do it.",
+    "Your future self will thank you for this final stretch.",
+];
 
 fn default_filter_map() -> JsonMap<String, Value> {
     let mut map = JsonMap::new();
@@ -95,6 +106,34 @@ fn format_elapsed(elapsed: u64) -> String {
     } else {
         format!("{}m", minutes)
     }
+}
+
+fn parse_workday_time(value: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(value.trim(), "%H:%M").ok()
+}
+
+fn current_local_day_key() -> String {
+    Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn parse_tracker_datetime(value: &str) -> Option<DateTime<Local>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Local))
+        .or_else(|| {
+            DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f%z")
+                .ok()
+                .map(|dt| dt.with_timezone(&Local))
+        })
+}
+
+fn motivational_phrase() -> &'static str {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as usize)
+        .unwrap_or(0);
+    let index = nanos % WORKDAY_MOTIVATION_PHRASES.len();
+    WORKDAY_MOTIVATION_PHRASES[index]
 }
 
 fn collapse_whitespace(value: &str) -> String {
@@ -459,10 +498,15 @@ async fn has_session_from_app(app: &tauri::AppHandle) -> Result<bool, String> {
 }
 
 fn convert_issues_native(issues: Vec<NativeIssue>) -> Vec<bridge::Issue> {
-    issues.into_iter().map(convert_issue_native).collect()
+    let config = ConfigManager::new().load();
+    let workday_hours = sanitize_workday_hours(config.workday_hours);
+    issues
+        .into_iter()
+        .map(|issue| convert_issue_native(issue, workday_hours))
+        .collect()
 }
 
-fn convert_issue_native(issue: NativeIssue) -> bridge::Issue {
+fn convert_issue_native(issue: NativeIssue, workday_hours: u64) -> bridge::Issue {
     let (status_key, status_display) = coerce_field_ref(issue.status.as_ref());
     let (priority_key, priority_display) = coerce_field_ref(issue.priority.as_ref());
 
@@ -478,6 +522,16 @@ fn convert_issue_native(issue: NativeIssue) -> bridge::Issue {
             key: priority_key,
             display: priority_display,
         },
+        tracked_seconds: issue
+            .spent
+            .as_ref()
+            .and_then(|value| parse_duration_value_to_seconds(value, workday_hours))
+            .or_else(|| {
+                issue
+                    .time_spent
+                    .as_ref()
+                    .and_then(|value| parse_duration_value_to_seconds(value, workday_hours))
+            }),
     }
 }
 
@@ -582,7 +636,71 @@ async fn fetch_issue_detail_native(
         .get_issue(issue_key)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(convert_issue_native(issue))
+    let config = ConfigManager::new().load();
+    let workday_hours = sanitize_workday_hours(config.workday_hours);
+    Ok(convert_issue_native(issue, workday_hours))
+}
+
+async fn fetch_worklogs_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<Vec<bridge::WorklogEntry>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let entries = client
+        .get_issue_worklogs(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    let config = ConfigManager::new().load();
+    let workday_hours = sanitize_workday_hours(config.workday_hours);
+    Ok(convert_worklogs_native(entries, workday_hours))
+}
+
+async fn fetch_today_logged_seconds_for_issues(
+    app: &tauri::AppHandle,
+    issues: &[bridge::Issue],
+    workday_hours: u64,
+) -> Result<u64, String> {
+    let secrets = secrets_from_app(app)?;
+    let client = build_tracker_client(&secrets)?;
+    let today_key = current_local_day_key();
+    let mut unique_keys = HashSet::new();
+    let mut total = 0u64;
+
+    for issue in issues {
+        if !unique_keys.insert(issue.key.clone()) {
+            continue;
+        }
+
+        let entries = client
+            .get_issue_worklogs(&issue.key)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        for entry in entries {
+            let date_value = entry
+                .start
+                .as_deref()
+                .or(entry.created_at.as_deref())
+                .unwrap_or("");
+
+            let is_today = parse_tracker_datetime(date_value)
+                .map(|date| date.format("%Y-%m-%d").to_string() == today_key)
+                .unwrap_or(false);
+
+            if !is_today {
+                continue;
+            }
+
+            let seconds = entry
+                .duration
+                .as_deref()
+                .and_then(|value| parse_tracker_duration_to_seconds(value, workday_hours))
+                .unwrap_or(0);
+            total = total.saturating_add(seconds);
+        }
+    }
+
+    Ok(total)
 }
 
 async fn fetch_statuses_native(
@@ -1076,6 +1194,87 @@ fn convert_transitions_native(transitions: Vec<NativeTransition>) -> Vec<bridge:
         .collect()
 }
 
+fn sanitize_workday_hours(hours: u8) -> u64 {
+    let normalized = hours.clamp(1, 24);
+    normalized as u64
+}
+
+fn parse_duration_value_to_seconds(value: &Value, workday_hours: u64) -> Option<u64> {
+    match value {
+        Value::String(text) => parse_tracker_duration_to_seconds(text, workday_hours),
+        Value::Number(number) => number.as_u64(),
+        Value::Object(map) => {
+            for key in ["duration", "value", "display", "text", "en", "ru"] {
+                if let Some(candidate) = map.get(key) {
+                    if let Some(seconds) = parse_duration_value_to_seconds(candidate, workday_hours) {
+                        return Some(seconds);
+                    }
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|entry| parse_duration_value_to_seconds(entry, workday_hours)),
+        Value::Bool(_) | Value::Null => None,
+    }
+}
+
+fn parse_tracker_duration_to_seconds(input: &str, workday_hours: u64) -> Option<u64> {
+    let normalized = input.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let mut weeks = 0u64;
+    let mut days = 0u64;
+    let mut hours = 0u64;
+    let mut minutes = 0u64;
+
+    for capture in DURATION_TOKEN_REGEX.captures_iter(&normalized) {
+        let value = capture[1].parse::<u64>().ok()?;
+        match &capture[2] {
+            "w" => weeks += value,
+            "d" => days += value,
+            "h" => hours += value,
+            "m" => minutes += value,
+            _ => {}
+        }
+    }
+
+    if weeks == 0 && days == 0 && hours == 0 && minutes == 0 {
+        return None;
+    }
+
+    const WORKDAYS_PER_WEEK: u64 = 5;
+    Some(
+        weeks * WORKDAYS_PER_WEEK * workday_hours * 3600
+            + days * workday_hours * 3600
+            + hours * 3600
+            + minutes * 60,
+    )
+}
+
+fn convert_worklogs_native(entries: Vec<NativeWorklogEntry>, workday_hours: u64) -> Vec<bridge::WorklogEntry> {
+    entries
+        .into_iter()
+        .map(|entry| bridge::WorklogEntry {
+            id: coerce_display_value(&entry.id).unwrap_or_default(),
+            date: entry
+                .start
+                .or(entry.created_at)
+                .unwrap_or_default(),
+            duration_seconds: entry
+                .duration
+                .as_deref()
+                .and_then(|value| parse_tracker_duration_to_seconds(value, workday_hours))
+                .unwrap_or(0),
+            comment: entry.comment.unwrap_or_default(),
+            author: coerce_comment_author(&entry.created_by),
+        })
+        .collect()
+}
+
 fn convert_transition_status(
     status: Option<&ytracker_api::TransitionDestination>,
 ) -> Option<bridge::Status> {
@@ -1383,6 +1582,15 @@ async fn get_comments(
 ) -> Result<Vec<bridge::Comment>, String> {
     let secrets_clone = secrets.inner().clone();
     fetch_comments_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn get_issue_worklogs(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::WorklogEntry>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_worklogs_native(secrets_clone, &issue_key).await
 }
 
 #[tauri::command]
@@ -1716,6 +1924,7 @@ pub fn run() {
             let thread_issue_store = issue_store_for_thread_loop.clone();
             std::thread::spawn(move || {
                 let config_manager = ConfigManager::new();
+                let mut last_workday_notification_day: Option<String> = None;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(60));
                     let state = timer_for_thread.get_state();
@@ -1730,7 +1939,8 @@ pub fn run() {
                         }
                     }
 
-                    let interval_minutes = config_manager.load().timer_notification_interval.max(1);
+                    let runtime_config = config_manager.load();
+                    let interval_minutes = runtime_config.timer_notification_interval.max(1);
                     if let Some(snapshot) =
                         timer_for_thread.check_notification_due(interval_minutes as u64 * 60)
                     {
@@ -1758,6 +1968,75 @@ pub fn run() {
                             warn!("Failed to show notification: {}", err);
                         }
                     }
+
+                    let now = Local::now();
+                    let today_key = now.format("%Y-%m-%d").to_string();
+                    let end_time = parse_workday_time(&runtime_config.workday_end_time);
+                    let already_notified_today =
+                        last_workday_notification_day.as_deref() == Some(today_key.as_str());
+
+                    if !already_notified_today
+                        && end_time.map(|value| now.time() >= value).unwrap_or(false)
+                    {
+                        last_workday_notification_day = Some(today_key);
+
+                        let app_for_workday_notification = notification_handle.clone();
+                        let issues_snapshot = thread_issue_store.snapshot();
+                        let active_elapsed_seconds = if state.active { state.elapsed } else { 0 };
+                        let expected_seconds = u64::from(runtime_config.workday_hours) * 3600;
+                        let workday_hours = sanitize_workday_hours(runtime_config.workday_hours);
+
+                        tauri::async_runtime::spawn(async move {
+                            let logged_seconds = match fetch_today_logged_seconds_for_issues(
+                                &app_for_workday_notification,
+                                &issues_snapshot,
+                                workday_hours,
+                            )
+                            .await
+                            {
+                                Ok(value) => value,
+                                Err(err) => {
+                                    debug!(
+                                        "Workday end summary skipped: {}",
+                                        redact_log_details(&err)
+                                    );
+                                    0
+                                }
+                            };
+
+                            let tracked_total = logged_seconds.saturating_add(active_elapsed_seconds);
+
+                            let (title, body) = if tracked_total < expected_seconds {
+                                (
+                                    "Workday wrap-up",
+                                    format!(
+                                        "Tracked {} of {} today. {}",
+                                        format_elapsed(tracked_total),
+                                        format_elapsed(expected_seconds),
+                                        motivational_phrase()
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "Great job today!",
+                                    format!(
+                                        "You tracked {} today. Have a good evening!",
+                                        format_elapsed(tracked_total)
+                                    ),
+                                )
+                            };
+
+                            if let Err(err) = app_for_workday_notification
+                                .notification()
+                                .builder()
+                                .title(title)
+                                .body(body)
+                                .show()
+                            {
+                                warn!("Failed to show end-of-workday notification: {}", err);
+                            }
+                        });
+                    }
                 }
             });
             Ok(())
@@ -1773,6 +2052,7 @@ pub fn run() {
             greet,
             get_issues,
             get_issue,
+            get_issue_worklogs,
             get_comments,
             add_comment,
             update_issue,
