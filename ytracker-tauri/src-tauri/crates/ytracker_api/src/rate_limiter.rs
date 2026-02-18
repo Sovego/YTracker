@@ -40,3 +40,26 @@ impl RateLimiter {
         self.cooldown
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RateLimiter;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn cooldown_accessor_returns_configured_value() {
+        let limiter = RateLimiter::new(Duration::from_millis(25));
+        assert_eq!(limiter.cooldown(), Duration::from_millis(25));
+    }
+
+    #[tokio::test]
+    async fn second_hit_waits_for_cooldown_interval() {
+        let limiter = RateLimiter::new(Duration::from_millis(40));
+
+        limiter.hit().await;
+        let start = Instant::now();
+        limiter.hit().await;
+
+        assert!(start.elapsed() >= Duration::from_millis(35));
+    }
+}

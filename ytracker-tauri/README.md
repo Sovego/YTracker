@@ -29,6 +29,31 @@ npm run tauri dev
 If credentials are not pre-populated via environment variables, open **Settings → OAuth** and store
 them using the built-in Stronghold vault. Tokens, org id, and org type are managed entirely in Rust.
 
+## Testing
+
+Run tests from each layer separately to keep ownership and coverage visible:
+
+```bash
+# Frontend/unit tests (React + bridge hook tests)
+cd ytracker-tauri
+npm run test
+npm run test:coverage
+
+# Native app tests (Tauri Rust crate)
+cd src-tauri
+cargo test
+
+# API client crate tests
+cd crates/ytracker_api
+cargo test
+```
+
+Policy for contributors:
+
+- Every new feature must include automated tests in the relevant layer.
+- Every bug fix must include a regression test when technically possible.
+- Keep frontend and API crate tests separate, and track their coverage independently.
+
 ## Building releases
 
 ```bash

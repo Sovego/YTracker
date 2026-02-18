@@ -830,3 +830,162 @@ impl IssueSearchRequest {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_http_error, extract_error_code, worklog_id_string, IssueSearchParams,
+        IssueSearchRequest, ScrollType, TrackerClient,
+    };
+    use crate::config::{AuthMethod, OrgType, TrackerConfig};
+    use crate::error::TrackerError;
+    use mockito::{Matcher, Server};
+    use reqwest::StatusCode;
+    use serde_json::{json, Map as JsonMap, Value};
+
+    fn test_client(base_url: &str) -> TrackerClient {
+        let config = TrackerConfig::new("test-token", OrgType::Yandex360)
+            .with_base_url(base_url)
+            .with_api_version("v3")
+            .with_org_id("org-123")
+            .with_auth_method(AuthMethod::OAuth)
+            .with_user_agent("ytracker-api-tests");
+
+        TrackerClient::new(config).expect("client should be created")
+    }
+
+    #[test]
+    fn worklog_id_string_normalizes_supported_values() {
+        assert_eq!(worklog_id_string(&Value::String(" 42 ".to_string())), Some("42".to_string()));
+        assert_eq!(worklog_id_string(&json!(101)), Some("101".to_string()));
+        assert_eq!(worklog_id_string(&Value::String("   ".to_string())), None);
+        assert_eq!(worklog_id_string(&Value::Bool(true)), None);
+    }
+
+    #[test]
+    fn issue_search_request_trims_empty_query() {
+        let mut filter = JsonMap::new();
+        filter.insert("queue".to_string(), json!("YT"));
+        let params = IssueSearchParams::new(Some("   ".to_string()), Some(filter.clone()));
+        let payload = IssueSearchRequest::from_params(&params);
+
+        assert!(payload.query.is_none());
+        assert_eq!(payload.filter, Some(filter));
+    }
+
+    #[test]
+    fn extract_error_code_reads_json_body_code_field() {
+        let code = extract_error_code(r#"{"code":"QUEUE_NOT_FOUND","message":"no queue"}"#);
+        assert_eq!(code.as_deref(), Some("QUEUE_NOT_FOUND"));
+        assert!(extract_error_code("not-json").is_none());
+    }
+
+    #[test]
+    fn build_http_error_includes_status_and_extracted_code() {
+        let err = build_http_error(StatusCode::BAD_REQUEST, r#"{"code":"BAD_REQ"}"#);
+        match err {
+            TrackerError::Http { status, code, .. } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(code.as_deref(), Some("BAD_REQ"));
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_with_query_sends_auth_and_org_headers() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/v3/ping")
+            .match_header("authorization", "OAuth test-token")
+            .match_header("x-org-id", "org-123")
+            .match_header("user-agent", "ytracker-api-tests")
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let result: Value = client
+            .get_with_query("ping", None)
+            .await
+            .expect("request should succeed");
+        assert_eq!(result, json!({}));
+    }
+
+    #[tokio::test]
+    async fn get_with_query_maps_unauthorized_to_authentication_error() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/v3/protected")
+            .with_status(401)
+            .with_body("token invalid")
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let result: Result<Value, TrackerError> = client.get_with_query("protected", None).await;
+
+        match result {
+            Err(TrackerError::Authentication(message)) => {
+                assert!(message.contains("Access denied"));
+                assert!(message.contains("token invalid"));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_issues_scroll_reads_scroll_headers() {
+        let mut server = Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/v3/issues/_search")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("fields".into(), "key,summary,description,status,priority,spent,timeSpent".into()),
+                Matcher::UrlEncoded("scrollType".into(), "sorted".into()),
+                Matcher::UrlEncoded("perScroll".into(), "50".into()),
+                Matcher::UrlEncoded("scrollTTLMillis".into(), "1500".into()),
+            ]))
+            .with_status(200)
+            .with_header("X-Scroll-Id", "sid-1")
+            .with_header("X-Scroll-Token", "stok-9")
+            .with_header("X-Total-Count", "77")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let params = IssueSearchParams::default();
+        let page = client
+            .search_issues_scroll(&params, None, Some(50), ScrollType::Sorted, Some(1_500))
+            .await
+            .expect("scroll search should succeed");
+
+        assert_eq!(page.scroll_id.as_deref(), Some("sid-1"));
+        assert_eq!(page.scroll_token.as_deref(), Some("stok-9"));
+        assert_eq!(page.total_count, Some(77));
+        assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_binary_supports_relative_href_and_content_type() {
+        let mut server = Server::new_async().await;
+        let body = vec![1_u8, 2, 3, 4];
+        let _mock = server
+            .mock("GET", "/files/bin")
+            .with_status(200)
+            .with_header("content-type", "application/octet-stream")
+            .with_body(body.clone())
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let content = client
+            .fetch_binary("/files/bin")
+            .await
+            .expect("binary fetch should succeed");
+
+        assert_eq!(content.bytes, body);
+        assert_eq!(content.mime_type.as_deref(), Some("application/octet-stream"));
+    }
+}

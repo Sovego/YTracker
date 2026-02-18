@@ -138,3 +138,45 @@ impl TrackerConfig {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AuthMethod, OrgType, TrackerConfig};
+    use std::time::Duration;
+
+    #[test]
+    fn org_type_header_names_match_contract() {
+        assert_eq!(OrgType::Yandex360.header_name(), "X-Org-ID");
+        assert_eq!(OrgType::Cloud.header_name(), "X-Cloud-Org-ID");
+    }
+
+    #[test]
+    fn auth_method_strings_match_header_scheme() {
+        assert_eq!(AuthMethod::OAuth.as_str(), "OAuth");
+        assert_eq!(AuthMethod::Bearer.as_str(), "Bearer");
+    }
+
+    #[test]
+    fn new_config_uses_defaults_and_builder_overrides() {
+        let config = TrackerConfig::new("token-1", OrgType::Cloud)
+            .with_org_id("org-77")
+            .with_base_url("https://example.test/")
+            .with_api_version("/v9")
+            .with_accept_language("en")
+            .with_user_agent("yt-tests")
+            .with_cooldown(Duration::from_millis(50))
+            .with_timeout(Duration::from_secs(5))
+            .with_connect_timeout(Duration::from_secs(3))
+            .with_auth_method(AuthMethod::Bearer);
+
+        assert_eq!(config.token, "token-1");
+        assert_eq!(config.org_id.as_deref(), Some("org-77"));
+        assert_eq!(config.accept_language.as_deref(), Some("en"));
+        assert_eq!(config.user_agent, "yt-tests");
+        assert_eq!(config.cooldown, Duration::from_millis(50));
+        assert_eq!(config.timeout, Duration::from_secs(5));
+        assert_eq!(config.connect_timeout, Duration::from_secs(3));
+        assert_eq!(config.auth_method, AuthMethod::Bearer);
+        assert_eq!(config.api_root(), "https://example.test/v9/");
+    }
+}

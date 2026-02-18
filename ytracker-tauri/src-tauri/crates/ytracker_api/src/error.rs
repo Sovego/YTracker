@@ -67,3 +67,44 @@ impl From<serde_json::Error> for TrackerError {
         TrackerError::Serialization(err.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TrackerError;
+    use reqwest::StatusCode;
+
+    #[test]
+    fn http_constructor_sets_status_code_and_message() {
+        let err = TrackerError::http(
+            StatusCode::BAD_REQUEST,
+            Some("BAD_INPUT".to_string()),
+            "invalid payload",
+        );
+
+        match err {
+            TrackerError::Http {
+                status,
+                code,
+                message,
+            } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(code.as_deref(), Some("BAD_INPUT"));
+                assert_eq!(message, "invalid payload");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serde_json_error_maps_to_serialization_variant() {
+        let parse_err = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let err = TrackerError::from(parse_err);
+
+        match err {
+            TrackerError::Serialization(message) => {
+                assert!(!message.trim().is_empty());
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+}

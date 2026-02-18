@@ -122,3 +122,76 @@ impl Timer {
         Some(snapshot)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_sets_active_state_and_issue_fields() {
+        let timer = Timer::new();
+        timer.start("YT-101".to_string(), Some("Implement tests".to_string()));
+
+        let snapshot = timer.get_state();
+        assert!(snapshot.active);
+        assert_eq!(snapshot.issue_key.as_deref(), Some("YT-101"));
+        assert_eq!(snapshot.issue_summary.as_deref(), Some("Implement tests"));
+        assert!(snapshot.start_time.is_some());
+    }
+
+    #[test]
+    fn stop_returns_elapsed_and_resets_timer() {
+        let timer = Timer::new();
+        timer.start("YT-102".to_string(), None);
+
+        {
+            let mut state = timer.state.lock().unwrap();
+            let now = Timer::now_secs();
+            state.start_time = Some(now.saturating_sub(5));
+        }
+
+        let (elapsed, key) = timer.stop();
+        assert!(elapsed >= 5);
+        assert_eq!(key.as_deref(), Some("YT-102"));
+
+        let snapshot = timer.get_state();
+        assert!(!snapshot.active);
+        assert!(snapshot.issue_key.is_none());
+        assert!(snapshot.start_time.is_none());
+        assert_eq!(snapshot.elapsed, 0);
+    }
+
+    #[test]
+    fn stop_when_inactive_returns_zero_and_none() {
+        let timer = Timer::new();
+        let result = timer.stop();
+        assert_eq!(result, (0, None));
+    }
+
+    #[test]
+    fn check_notification_due_respects_interval_and_active_state() {
+        let timer = Timer::new();
+        assert!(timer.check_notification_due(15).is_none());
+
+        timer.start("YT-103".to_string(), None);
+
+        {
+            let mut last = timer.last_notification_at.lock().unwrap();
+            *last = Some(0);
+        }
+
+        let due = timer.check_notification_due(1);
+        assert!(due.is_some());
+        assert_eq!(due.and_then(|state| state.issue_key).as_deref(), Some("YT-103"));
+
+        let immediate_second = timer.check_notification_due(60);
+        assert!(immediate_second.is_none());
+    }
+
+    #[test]
+    fn check_notification_due_returns_none_for_zero_interval() {
+        let timer = Timer::new();
+        timer.start("YT-104".to_string(), None);
+        assert!(timer.check_notification_due(0).is_none());
+    }
+}
