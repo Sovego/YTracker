@@ -495,9 +495,9 @@ export function useIssueDetails() {
         );
     };
 
-    const getTodayLoggedSecondsForIssues = async (issueKeys: string[]) => {
+    const getTodayLoggedSecondsForIssues = useCallback(async (issueKeys: string[]) => {
         return invoke<number>("get_today_logged_seconds_for_issues", { issueKeys });
-    };
+    }, []);
 
     const executeTransition = async (issueKey: string, transitionId: string, comment?: string, resolution?: string) => {
         const result = await invoke("execute_transition", { issueKey, transitionId, comment, resolution });

@@ -1,4 +1,4 @@
-use crate::models::CommentAuthor;
+use crate::models::{CommentAuthor, SimpleEntityRaw};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -6,6 +6,7 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub struct WorklogEntry {
     pub id: Value,
+    pub issue: Option<SimpleEntityRaw>,
     pub comment: Option<String>,
     pub created_by: Option<CommentAuthor>,
     pub created_at: Option<String>,

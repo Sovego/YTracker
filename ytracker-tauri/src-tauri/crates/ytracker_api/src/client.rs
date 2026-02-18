@@ -377,6 +377,41 @@ impl TrackerClient {
         Ok(result)
     }
 
+    pub async fn get_worklogs_by_params(
+        &self,
+        created_by: Option<&str>,
+        created_from: Option<&str>,
+        created_to: Option<&str>,
+    ) -> Result<Vec<TrackerWorklogEntry>> {
+        self.limiter.hit().await;
+        let url = format!("{}worklog", self.config.api_root());
+        let mut params: Vec<(&str, String)> = Vec::new();
+
+        if let Some(value) = created_by {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                params.push(("createdBy", trimmed.to_string()));
+            }
+        }
+
+        if let Some(value) = created_from {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                params.push(("createdAt", format!("from:{}", trimmed)));
+            }
+        }
+
+        if let Some(value) = created_to {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                params.push(("createdAt", format!("to:{}", trimmed)));
+            }
+        }
+
+        let response = self.http.get(url).query(&params).send().await?;
+        Self::parse_json(response).await
+    }
+
     /// GET /v3/issues/<issue_key>/checklistItems — get checklist items.
     pub async fn get_checklist(
         &self,

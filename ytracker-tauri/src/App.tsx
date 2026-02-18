@@ -79,6 +79,7 @@ function App() {
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreInFlightRef = useRef(false);
   const lastScrollTopRef = useRef(0);
+  const progressRefreshInFlightRef = useRef(false);
   const isNarrowLayout = useMediaQuery("(max-width: 1023px)");
   const showDetailPlaceholder = loading && issues.length === 0;
 
@@ -167,40 +168,61 @@ function App() {
     });
   }, [issues, normalizedTextFilter]);
 
-  useEffect(() => {
-    let cancelled = false;
-
+  const refreshTodayProgress = useCallback(async (options?: { showLoading?: boolean }) => {
     if (!isAuthenticated || issues.length === 0) {
       setLoggedTodaySeconds(0);
       setLoadingTodayProgress(false);
       return;
     }
 
-    const calculateTodayTracked = async () => {
-      setLoadingTodayProgress(true);
-      const keys = Array.from(new Set(issues.map((issue) => issue.key)));
-      try {
-        const total = await getTodayLoggedSecondsForIssues(keys);
-        if (!cancelled) {
-          setLoggedTodaySeconds(total);
-        }
-      } catch {
-        if (!cancelled) {
-          setLoggedTodaySeconds(0);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoadingTodayProgress(false);
-        }
-      }
-    };
+    if (progressRefreshInFlightRef.current) {
+      return;
+    }
 
-    void calculateTodayTracked();
+    progressRefreshInFlightRef.current = true;
+
+    const showLoading = options?.showLoading ?? true;
+    let loadingTimer: ReturnType<typeof setTimeout> | null = null;
+    if (showLoading) {
+      loadingTimer = setTimeout(() => {
+        setLoadingTodayProgress(true);
+      }, 250);
+    }
+
+    const keys = Array.from(new Set(issues.map((issue) => issue.key)));
+    try {
+      const total = await getTodayLoggedSecondsForIssues(keys);
+      setLoggedTodaySeconds(total);
+    } catch {
+      // Keep previous value on transient failures instead of dropping to zero.
+    } finally {
+      if (loadingTimer) {
+        clearTimeout(loadingTimer);
+      }
+      if (showLoading) {
+        setLoadingTodayProgress(false);
+      }
+      progressRefreshInFlightRef.current = false;
+    }
+  }, [isAuthenticated, issues, getTodayLoggedSecondsForIssues]);
+
+  useEffect(() => {
+    void refreshTodayProgress({ showLoading: true });
+  }, [refreshTodayProgress]);
+
+  useEffect(() => {
+    if (!isAuthenticated || issues.length === 0 || typeof window === "undefined") {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void refreshTodayProgress({ showLoading: false });
+    }, 60_000);
 
     return () => {
-      cancelled = true;
+      window.clearInterval(interval);
     };
-  }, [isAuthenticated, issues]);
+  }, [isAuthenticated, issues.length, refreshTodayProgress]);
 
   const workdayHours = Math.min(24, Math.max(1, config?.workday_hours ?? 8));
   const targetTodaySeconds = workdayHours * 3600;
