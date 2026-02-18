@@ -1,6 +1,6 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use chrono::{DateTime, Local, NaiveTime, Utc};
+use chrono::{DateTime, Duration, Local, NaiveTime, Utc};
 use directories::UserDirs;
 use log::{debug, info, warn};
 use once_cell::sync::Lazy;
@@ -786,10 +786,15 @@ async fn fetch_today_logged_seconds_for_issue_keys(
     let secrets = secrets_from_app(app)?;
     let client = build_tracker_client(&secrets)?;
     let today_key = current_local_day_key();
-    let today = Local::now().date_naive();
-    let tomorrow = today.succ_opt().unwrap_or(today);
-    let created_from = format!("{}T00:00:00", today.format("%Y-%m-%d"));
-    let created_to = format!("{}T00:00:00", tomorrow.format("%Y-%m-%d"));
+    let now_local = Local::now();
+    let start_of_today = now_local
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| naive.and_local_timezone(Local).single())
+        .ok_or_else(|| "Failed to resolve local day start".to_string())?;
+    let start_of_tomorrow = start_of_today + Duration::days(1);
+    let created_from = start_of_today.to_rfc3339();
+    let created_to = start_of_tomorrow.to_rfc3339();
 
     let mut current_login: Option<String> = None;
     let created_by = ensure_current_login(&client, &mut current_login).await.ok();
@@ -1360,6 +1365,28 @@ fn sanitize_workday_hours(hours: u8) -> u64 {
     normalized as u64
 }
 
+fn sanitize_workday_time(value: String, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    if parse_workday_time(trimmed).is_some() {
+        trimmed.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn normalize_config(mut config: Config) -> Config {
+    config.workday_hours = sanitize_workday_hours(config.workday_hours) as u8;
+    config.workday_start_time = sanitize_workday_time(config.workday_start_time, "09:00");
+    config.workday_end_time = sanitize_workday_time(config.workday_end_time, "17:00");
+    if config.timer_notification_interval == 0 {
+        config.timer_notification_interval = 1;
+    }
+    config
+}
+
 fn parse_duration_value_to_seconds(value: &Value, workday_hours: u64) -> Option<u64> {
     match value {
         Value::String(text) => parse_tracker_duration_to_seconds(text, workday_hours),
@@ -1467,13 +1494,14 @@ fn convert_transition_status(
 #[tauri::command]
 fn get_config() -> Config {
     let cm = ConfigManager::new();
-    cm.load()
+    normalize_config(cm.load())
 }
 
 #[tauri::command]
 fn save_config(config: Config) -> Result<(), String> {
     let cm = ConfigManager::new();
-    cm.save(&config).map_err(|e| e.to_string())
+    let normalized = normalize_config(config);
+    cm.save(&normalized).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

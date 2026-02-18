@@ -383,33 +383,31 @@ impl TrackerClient {
         created_from: Option<&str>,
         created_to: Option<&str>,
     ) -> Result<Vec<TrackerWorklogEntry>> {
-        self.limiter.hit().await;
-        let url = format!("{}worklog", self.config.api_root());
-        let mut params: Vec<(&str, String)> = Vec::new();
+        let created_by = created_by
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let created_from = created_from
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let created_to = created_to
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
 
-        if let Some(value) = created_by {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                params.push(("createdBy", trimmed.to_string()));
-            }
-        }
+        let created_at = if created_from.is_some() || created_to.is_some() {
+            Some(WorklogCreatedAtRange {
+                from: created_from,
+                to: created_to,
+            })
+        } else {
+            None
+        };
 
-        if let Some(value) = created_from {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                params.push(("createdAt", format!("from:{}", trimmed)));
-            }
-        }
+        let payload = WorklogSearchRequest {
+            created_by,
+            created_at,
+        };
 
-        if let Some(value) = created_to {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                params.push(("createdAt", format!("to:{}", trimmed)));
-            }
-        }
-
-        let response = self.http.get(url).query(&params).send().await?;
-        Self::parse_json(response).await
+        self.post("worklog/_search", &payload).await
     }
 
     /// GET /v3/issues/<issue_key>/checklistItems — get checklist items.
@@ -725,6 +723,23 @@ struct WorklogCreateRequest<'a> {
     duration: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     comment: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorklogSearchRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_by: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<WorklogCreatedAtRange<'a>>,
+}
+
+#[derive(Serialize)]
+struct WorklogCreatedAtRange<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]

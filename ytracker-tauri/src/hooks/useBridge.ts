@@ -154,9 +154,9 @@ const CONFIG_UPDATED_EVENT = "ytracker:config-updated";
 
 const normalizeConfig = (data: Config): Config => ({
     timer_notification_interval: data.timer_notification_interval,
-    workday_hours: Math.min(24, Math.max(1, data.workday_hours ?? 8)),
-    workday_start_time: data.workday_start_time || "09:00",
-    workday_end_time: data.workday_end_time || "17:00",
+    workday_hours: data.workday_hours,
+    workday_start_time: data.workday_start_time,
+    workday_end_time: data.workday_end_time,
 });
 
 const fetchConfigCached = async (force = false): Promise<Config> => {
