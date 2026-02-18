@@ -21,6 +21,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 import { FilterSelect, type FilterOption } from "./components/FilterSelect";
+import { getErrorSummary } from "./utils";
 
 const BASE_RESOLUTION_FILTER = "empty()";
 const SELF_ASSIGNEE_VALUE = "me()";
@@ -186,8 +187,8 @@ function App() {
             setActiveSearchOptions(initialSearchOptionsRef.current);
           }
         }
-      } catch {
-        console.warn("Initial issue load failed");
+      } catch (err) {
+        console.warn(`Initial issue load failed (${getErrorSummary(err)})`);
         if (!cancelled) {
           setIsAuthenticated(false);
         }
@@ -264,9 +265,9 @@ function App() {
         if (!granted) {
           console.warn("Notifications are disabled; timer reminders will be muted.");
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          console.warn("Unable to check notification permission");
+          console.warn(`Unable to check notification permission (${getErrorSummary(err)})`);
         }
       }
     };
@@ -314,7 +315,8 @@ function App() {
     setAuthChecked(true);
     setActiveSearchOptions(searchOptions);
     setTextFilter("");
-    void refreshCatalogs(true).catch(() => {
+    void refreshCatalogs().catch((err) => {
+      console.warn(`Catalog refresh after login failed (${getErrorSummary(err)})`);
       // Login flow still proceeds; catalog error is already handled in hook state/UI.
     });
     void fetchIssues(searchOptions);
@@ -344,8 +346,8 @@ function App() {
     });
 
     return () => {
-      unlisten.then((dispose) => dispose()).catch(() => {
-        console.warn("Failed to dispose timer-stopped listener");
+      unlisten.then((dispose) => dispose()).catch((err) => {
+        console.warn(`Failed to dispose timer-stopped listener (${getErrorSummary(err)})`);
       });
     };
   }, [isAuthenticated, openWorkLogDialog]);
@@ -353,8 +355,8 @@ function App() {
   const dismissWorkLogDialog = () => {
     setWorkLogData(null);
     if (pendingRestart) {
-      void invokeStartTimer(pendingRestart.key, pendingRestart.summary).catch(() => {
-        console.error("Failed to restart timer after logging");
+      void invokeStartTimer(pendingRestart.key, pendingRestart.summary).catch((err) => {
+        console.error(`Failed to restart timer after logging (${getErrorSummary(err)})`);
       });
       setPendingRestart(null);
     }
@@ -412,8 +414,8 @@ function App() {
 
         // If closed without a response, treat as cancel
         return;
-      } catch {
-        console.error("Timer conflict dialog failed");
+      } catch (err) {
+        console.error(`Timer conflict dialog failed (${getErrorSummary(err)})`);
         // As a fallback, do nothing to avoid losing data
         return;
       }

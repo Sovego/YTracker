@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Play, Square, Edit2, Save, X, Download, MessageSquare, Paperclip, ChevronDown, Send, Eye, Loader2 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback, ImgHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
-import { formatDurationHuman } from "../utils";
+import { formatDurationHuman, getErrorSummary } from "../utils";
 
 const STATUS_CHIPS: Record<string, { dot: string; pill: string; glow: string }> = {
     open: {
@@ -191,8 +191,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         setLoadingDetails(true);
         try {
             const [detail, c, a, t] = await Promise.all([
-                getIssue(key).catch(() => {
-                    console.error("Failed to fetch issue detail");
+                getIssue(key).catch((err) => {
+                    console.error(`Failed to fetch issue detail (${getErrorSummary(err)})`);
                     return null;
                 }),
                 getComments(key),
@@ -210,8 +210,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setComments(c);
             setAttachments(a);
             setTransitions(t);
-        } catch {
-            console.error("Failed to load details");
+        } catch (e) {
+            console.error(`Failed to load details (${getErrorSummary(e)})`);
             if (issue && issue.key === key) {
                 setComments([]);
                 setAttachments([]);
@@ -230,11 +230,11 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setIsEditing(false);
             closeStatusMenu();
             // Load details asynchronously without blocking render
-            loadDetails(issue.key).catch(() => {
-                console.error("Failed to load issue details");
+            loadDetails(issue.key).catch((err) => {
+                console.error(`Failed to load issue details (${getErrorSummary(err)})`);
             });
-            getResolutions().then(setResolutions).catch(() => {
-                console.error("Failed to load resolutions");
+            getResolutions().then(setResolutions).catch((err) => {
+                console.error(`Failed to load resolutions (${getErrorSummary(err)})`);
             });
         } else {
             setIssueDetails(null);
@@ -292,8 +292,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             await updateIssue(activeIssue.key, editSummary, editDescription);
             setIsEditing(false);
             onIssueUpdate(); // Refresh parent
-        } catch {
-            console.error("Failed to update issue");
+        } catch (e) {
+            console.error(`Failed to update issue (${getErrorSummary(e)})`);
             alert("Failed to update issue");
         }
     };
@@ -305,8 +305,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setNewComment("");
             const c = await getComments(activeIssue.key);
             setComments(c);
-        } catch {
-            console.error("Failed to add comment");
+        } catch (e) {
+            console.error(`Failed to add comment (${getErrorSummary(e)})`);
             alert("Failed to add comment");
         }
     };
@@ -337,8 +337,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             onIssueUpdate();
             loadDetails(activeIssue.key);
             setTransitionDialog(prev => ({ ...prev, isOpen: false }));
-        } catch {
-            console.error("Failed to transition");
+        } catch (e) {
+            console.error(`Failed to transition (${getErrorSummary(e)})`);
             alert("Failed to transition");
         }
     };
@@ -392,7 +392,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                         try {
                             return await previewAttachment(activeIssue.key, attachmentId);
                         } catch (fallbackError) {
-                            console.error("Fallback attachment preview failed");
+                            console.error(`Fallback attachment preview failed (${getErrorSummary(fallbackError)})`);
                             throw fallbackError;
                         }
                     }
@@ -413,7 +413,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                 }));
             })
             .catch(err => {
-                console.error("Failed to load inline image");
+                console.error(`Failed to load inline image (${getErrorSummary(err)})`);
                 setInlineImages(prev => ({
                     ...prev,
                     [source]: {
@@ -450,8 +450,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                 attachment: att,
                 dataUrl: `data:${preview.mime_type};base64,${preview.data_base64}`,
             });
-        } catch {
-            console.error("Failed to preview attachment");
+        } catch (e) {
+            console.error(`Failed to preview attachment (${getErrorSummary(e)})`);
             setPreviewError("Failed to load preview. Please try downloading instead.");
         } finally {
             setPreviewLoadingId(null);

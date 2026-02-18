@@ -27,3 +27,18 @@ export function formatDurationHuman(seconds: number): string {
 
     return parts.join(" ");
 }
+
+export function getErrorSummary(error: unknown): string {
+    if (error instanceof Error) {
+        const name = error.name || "Error";
+        const message = error.message ? `: ${error.message}` : "";
+        return `${name}${message}`.slice(0, 180);
+    }
+
+    const raw = String(error ?? "unknown").trim();
+    if (!raw) {
+        return "unknown";
+    }
+
+    return raw.slice(0, 180);
+}

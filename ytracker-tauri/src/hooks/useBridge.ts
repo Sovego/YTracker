@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getErrorSummary } from "../utils";
 
 export interface Issue {
     key: string;
@@ -516,8 +517,8 @@ export function useTracker() {
             return;
         }
         nextScrollIdRef.current = null;
-        void invoke("release_scroll_context", { scroll_id: scrollId }).catch(() => {
-            console.warn("Failed to release scroll context");
+        void invoke("release_scroll_context", { scroll_id: scrollId }).catch((err) => {
+            console.warn(`Failed to release scroll context (${getErrorSummary(err)})`);
         });
     }, []);
 
@@ -723,8 +724,8 @@ export function useClientCredentials() {
 export const checkSessionExists = async (): Promise<boolean> => {
     try {
         return await invoke<boolean>("has_session");
-    } catch {
-        console.warn("Session check failed");
+    } catch (err) {
+        console.warn(`Session check failed (${getErrorSummary(err)})`);
         return false;
     }
 };
@@ -738,8 +739,8 @@ export function useConfig() {
             .then((data) => {
                 if (!cancelled) setConfig(data);
             })
-            .catch(() => {
-                console.warn("Failed to load config");
+            .catch((err) => {
+                console.warn(`Failed to load config (${getErrorSummary(err)})`);
             });
         return () => {
             cancelled = true;

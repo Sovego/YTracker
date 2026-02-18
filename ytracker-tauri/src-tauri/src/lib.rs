@@ -116,6 +116,12 @@ fn truncate_text(value: &str, limit: usize) -> String {
 
 fn redact_log_details(value: &str) -> String {
     let collapsed = collapse_whitespace(value);
+    let category = collapsed
+        .split(':')
+        .next()
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or("error");
     let lowered = collapsed.to_lowercase();
     let has_sensitive_hint = [
         "token",
@@ -131,7 +137,10 @@ fn redact_log_details(value: &str) -> String {
     .any(|hint| lowered.contains(hint));
 
     if has_sensitive_hint {
-        return "<redacted-sensitive-details>".to_string();
+        return format!(
+            "{}: <redacted-sensitive-details>",
+            truncate_text(category, 64)
+        );
     }
 
     truncate_text(&collapsed, 180)

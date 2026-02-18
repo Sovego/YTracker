@@ -5,7 +5,12 @@
 
 version: 2
 updates:
-  - package-ecosystem: "npm, cargo" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "npm"
+    directory: "/ytracker-tauri"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/ytracker-tauri/src-tauri"
     schedule:
       interval: "weekly"
