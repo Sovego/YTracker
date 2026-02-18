@@ -77,6 +77,33 @@ export interface WorklogEntry {
     author: string;
 }
 
+export interface ChecklistItem {
+    id: string;
+    text: string;
+    checked: boolean;
+    assignee?: string | null;
+    deadline?: string | null;
+    deadline_type?: string | null;
+    is_exceeded?: boolean | null;
+    item_type?: string | null;
+}
+
+export interface ChecklistItemCreatePayload {
+    text: string;
+    checked?: boolean;
+    assignee?: string | null;
+    deadline?: string | null;
+    deadline_type?: string | null;
+}
+
+export interface ChecklistItemUpdatePayload {
+    text?: string;
+    checked?: boolean;
+    assignee?: string | null;
+    deadline?: string | null;
+    deadline_type?: string | null;
+}
+
 export interface Transition {
     id: string;
     name: string;
@@ -183,7 +210,8 @@ const detailCache = {
     comments: new Map<string, CacheEntry<Comment[]>>(),
     attachments: new Map<string, CacheEntry<Attachment[]>>(),
     transitions: new Map<string, CacheEntry<Transition[]>>(),
-    worklogs: new Map<string, CacheEntry<WorklogEntry[]>>()
+    worklogs: new Map<string, CacheEntry<WorklogEntry[]>>(),
+    checklist: new Map<string, CacheEntry<ChecklistItem[]>>()
 };
 
 const DEFAULT_ISSUE_QUERY_KEY = "__default__";
@@ -375,11 +403,12 @@ const setCache = <T>(map: Map<string, CacheEntry<T>>, key: string, data: T) => {
     map.set(key, { data, timestamp: Date.now() });
 };
 
-const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "worklogs" | "all") => {
+const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "worklogs" | "checklist" | "all") => {
     if (type === "comments" || type === "all") detailCache.comments.delete(issueKey);
     if (type === "attachments" || type === "all") detailCache.attachments.delete(issueKey);
     if (type === "transitions" || type === "all") detailCache.transitions.delete(issueKey);
     if (type === "worklogs" || type === "all") detailCache.worklogs.delete(issueKey);
+    if (type === "checklist" || type === "all") detailCache.checklist.delete(issueKey);
 };
 
 const fetchWithCache = async <T>(
@@ -404,6 +433,7 @@ const getCachedDetails = (issueKey: string) => ({
     attachments: getFreshCache(detailCache.attachments, issueKey) ?? null,
     transitions: getFreshCache(detailCache.transitions, issueKey) ?? null,
     worklogs: getFreshCache(detailCache.worklogs, issueKey) ?? null,
+    checklist: getFreshCache(detailCache.checklist, issueKey) ?? null,
 });
 
 export function useIssueDetails() {
@@ -511,6 +541,35 @@ export function useIssueDetails() {
         return resolutionsPromise;
     };
 
+    const getChecklist = async (issueKey: string, options?: { forceRefresh?: boolean }) => {
+        return fetchWithCache(
+            detailCache.checklist,
+            issueKey,
+            () => invoke<ChecklistItem[]>("get_checklist", { issueKey }),
+            options?.forceRefresh
+        );
+    };
+
+    const addChecklistItem = async (issueKey: string, item: ChecklistItemCreatePayload) => {
+        await invoke("add_checklist_item", { issueKey, item });
+        invalidateCache(issueKey, "checklist");
+    };
+
+    const editChecklistItem = async (issueKey: string, itemId: string, update: ChecklistItemUpdatePayload) => {
+        await invoke("edit_checklist_item", { issueKey, itemId, update });
+        invalidateCache(issueKey, "checklist");
+    };
+
+    const deleteChecklist = async (issueKey: string) => {
+        await invoke("delete_checklist", { issueKey });
+        invalidateCache(issueKey, "checklist");
+    };
+
+    const deleteChecklistItem = async (issueKey: string, itemId: string) => {
+        await invoke("delete_checklist_item", { issueKey, itemId });
+        invalidateCache(issueKey, "checklist");
+    };
+
     return {
         getIssue,
         getComments,
@@ -527,6 +586,11 @@ export function useIssueDetails() {
         clearIssueCache,
         getStatuses,
         getResolutions,
+        getChecklist,
+        addChecklistItem,
+        editChecklistItem,
+        deleteChecklist,
+        deleteChecklistItem,
     };
 }
 

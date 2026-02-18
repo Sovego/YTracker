@@ -82,8 +82,6 @@ function App() {
   const isNarrowLayout = useMediaQuery("(max-width: 1023px)");
   const showDetailPlaceholder = loading && issues.length === 0;
 
-  const showDetailOverlay = isNarrowLayout && !!selectedIssue;
-
   useEffect(() => {
     setFiltersExpanded(!isNarrowLayout);
   }, [isNarrowLayout]);
@@ -233,26 +231,6 @@ function App() {
   const todayTrackedPercent = targetTodaySeconds > 0
     ? Math.min(100, Math.round((todayTrackedSeconds / targetTodaySeconds) * 100))
     : 0;
-
-  useEffect(() => {
-    if (!showDetailOverlay || typeof window === "undefined") return;
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [showDetailOverlay]);
-
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-
-    const originalOverflow = document.documentElement.style.overflow;
-    if (showDetailOverlay) {
-      document.documentElement.style.overflow = "hidden";
-    } else {
-      document.documentElement.style.overflow = "";
-    }
-
-    return () => {
-      document.documentElement.style.overflow = originalOverflow;
-    };
-  }, [showDetailOverlay]);
 
   // Initial check - ensure we have a session before fetching issues.
   useEffect(() => {
@@ -544,7 +522,7 @@ function App() {
       <div className="glass-panel app-shell flex w-full min-h-screen lg:h-screen overflow-visible lg:overflow-hidden">
         <div className="flex flex-1 flex-col lg:flex-row min-h-0 w-full">
           {/* Sidebar */}
-          <aside className="w-full lg:w-[360px] border-b lg:border-b-0 lg:border-r border-white/60 dark:border-slate-800/70 bg-gradient-to-b from-white/95 via-white/75 to-white/60 dark:from-slate-900/80 dark:via-slate-900/60 dark:to-slate-900/40 flex flex-col flex-shrink-0 min-h-[260px]">
+          <aside className={`${isNarrowLayout && selectedIssue ? "hidden lg:flex" : "flex"} w-full lg:w-[360px] border-b lg:border-b-0 lg:border-r border-white/60 dark:border-slate-800/70 bg-gradient-to-b from-white/95 via-white/75 to-white/60 dark:from-slate-900/80 dark:via-slate-900/60 dark:to-slate-900/40 flex-col flex-shrink-0 min-h-[260px]`}>
             <div className="px-6 pt-8 pb-6 border-b border-white/60 dark:border-slate-800/70">
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -738,11 +716,23 @@ function App() {
           </aside>
 
           {/* Main Content */}
-          <main className={`${isNarrowLayout && !selectedIssue ? "hidden lg:block" : "flex-1"} relative bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 ${showDetailOverlay ? "overflow-hidden" : "overflow-auto lg:overflow-hidden"}`}>
+          <main className={`${isNarrowLayout && !selectedIssue ? "hidden lg:flex" : "flex-1"} relative flex flex-col bg-gradient-to-br from-white/60 via-white/30 to-transparent dark:from-slate-900/40 dark:via-slate-900/20 min-h-0 overflow-hidden`}>
             {showDetailPlaceholder ? (
               <IssueDetailPlaceholder />
-            ) : (!isNarrowLayout || !selectedIssue) && (
-              <div key={detailKey} className="h-full animate-fadeUp">
+            ) : (
+              <>
+                {isNarrowLayout && selectedIssue && (
+                  <div className="p-4 border-b border-white/60 dark:border-slate-800/70 flex items-center justify-between lg:hidden">
+                    <button
+                      onClick={() => setSelectedIssue(null)}
+                      className="px-3 py-2 rounded-full bg-slate-200/80 dark:bg-slate-800/80 text-slate-700 dark:text-slate-100 text-sm font-semibold"
+                    >
+                      ← Back
+                    </button>
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Details</p>
+                  </div>
+                )}
+                <div key={detailKey} className="flex-1 min-h-0 animate-fadeUp">
                 {selectedIssue ? (
                   <IssueDetail
                     issue={selectedIssue}
@@ -760,32 +750,8 @@ function App() {
                     <p className="text-sm text-slate-500 mt-2">Choose one from the left pane to begin.</p>
                   </div>
                 )}
-              </div>
-            )}
-
-            {showDetailOverlay && selectedIssue && (
-              <div className="fixed inset-0 z-50 bg-gradient-to-br from-white/95 via-white/90 to-white/85 dark:from-slate-950/95 dark:via-slate-950/90 dark:to-slate-950/85 backdrop-blur-2xl lg:hidden animate-fadeUp">
-                <div className="h-full flex flex-col">
-                  <div className="p-4 border-b border-white/60 dark:border-slate-800/70 flex items-center justify-between">
-                    <button
-                      onClick={() => setSelectedIssue(null)}
-                      className="px-3 py-2 rounded-full bg-slate-200/80 dark:bg-slate-800/80 text-slate-700 dark:text-slate-100 text-sm font-semibold"
-                    >
-                      ← Back
-                    </button>
-                    <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Details</p>
-                  </div>
-                  <div className="flex-1 overflow-y-auto">
-                    <IssueDetail
-                      issue={selectedIssue}
-                      timerState={timerState}
-                      onStart={handleStartTimer}
-                      onStop={handleStopTimer}
-                      onIssueUpdate={refreshActiveIssues}
-                    />
-                  </div>
                 </div>
-              </div>
+              </>
             )}
           </main>
         </div>

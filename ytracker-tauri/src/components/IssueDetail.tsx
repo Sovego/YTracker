@@ -1,10 +1,11 @@
-import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity, WorklogEntry } from "../hooks/useBridge";
+import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity, WorklogEntry, ChecklistItem } from "../hooks/useBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Play, Square, Edit2, Save, X, Download, MessageSquare, Paperclip, ChevronDown, Send, Eye, Loader2 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback, ImgHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { formatDurationHuman, getErrorSummary } from "../utils";
+import { Checklist } from "./Checklist";
 
 const STATUS_CHIPS: Record<string, { dot: string; pill: string; glow: string }> = {
     open: {
@@ -121,7 +122,7 @@ interface IssueDetailProps {
 }
 
 export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate }: IssueDetailProps) {
-    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions } = useIssueDetails();
+    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions, getChecklist, addChecklistItem, editChecklistItem, deleteChecklist, deleteChecklistItem } = useIssueDetails();
 
     const [comments, setComments] = useState<Comment[]>([]);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -144,6 +145,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
 
     const [loadingDetails, setLoadingDetails] = useState(false);
     const [worklogs, setWorklogs] = useState<WorklogEntry[]>([]);
+    const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([]);
+    const [checklistLoading, setChecklistLoading] = useState(false);
     const [worklogDialogOpen, setWorklogDialogOpen] = useState(false);
     const [worklogLoading, setWorklogLoading] = useState(false);
     const [worklogError, setWorklogError] = useState<string | null>(null);
@@ -195,14 +198,18 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
     const loadDetails = async (key: string) => {
         setLoadingDetails(true);
         try {
-            const [detail, c, a, t] = await Promise.all([
+            const [detail, c, a, t, cl] = await Promise.all([
                 getIssue(key).catch((err) => {
                     console.error(`Failed to fetch issue detail (${getErrorSummary(err)})`);
                     return null;
                 }),
                 getComments(key),
                 getAttachments(key),
-                getTransitions(key)
+                getTransitions(key),
+                getChecklist(key).catch((err) => {
+                    console.error(`Failed to fetch checklist (${getErrorSummary(err)})`);
+                    return [] as ChecklistItem[];
+                }),
             ]);
 
             if (!issue || issue.key !== key) {
@@ -215,12 +222,14 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setComments(c);
             setAttachments(a);
             setTransitions(t);
+            setChecklistItems(cl);
         } catch (e) {
             console.error(`Failed to load details (${getErrorSummary(e)})`);
             if (issue && issue.key === key) {
                 setComments([]);
                 setAttachments([]);
                 setTransitions([]);
+                setChecklistItems([]);
             }
         } finally {
             setLoadingDetails(false);
@@ -255,6 +264,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         setWorklogLoading(false);
         setWorklogError(null);
         setVisibleWorklogCount(20);
+        setChecklistItems([]);
+        setChecklistLoading(false);
     }, [issue?.key]);
 
     useEffect(() => {
@@ -513,6 +524,19 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         setWorklogError(null);
     };
 
+    const refreshChecklist = useCallback(async () => {
+        if (!activeIssue) return;
+        setChecklistLoading(true);
+        try {
+            const items = await getChecklist(activeIssue.key, { forceRefresh: true });
+            setChecklistItems(items);
+        } catch (err) {
+            console.error(`Failed to refresh checklist (${getErrorSummary(err)})`);
+        } finally {
+            setChecklistLoading(false);
+        }
+    }, [activeIssue, getChecklist]);
+
     const trackedSeconds = worklogs.length > 0
         ? worklogs.reduce((total, entry) => total + (entry.duration_seconds || 0), 0)
         : (activeIssue?.tracked_seconds ?? 0);
@@ -726,6 +750,17 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                             </div>
                         )}
                     </section>
+
+                    <Checklist
+                        issueKey={activeIssue.key}
+                        items={checklistItems}
+                        loading={checklistLoading}
+                        onRefresh={refreshChecklist}
+                        onAddItem={addChecklistItem}
+                        onEditItem={editChecklistItem}
+                        onDeleteItem={deleteChecklistItem}
+                        onDeleteChecklist={deleteChecklist}
+                    />
 
                     {attachments.length > 0 && (
                         <section className="gtk-card p-6">

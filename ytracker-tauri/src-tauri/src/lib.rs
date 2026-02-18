@@ -33,7 +33,10 @@ use ytracker_api::models::CommentAuthor as NativeCommentAuthor;
 use ytracker_api::rate_limiter::RateLimiter;
 use ytracker_api::client::IssueSearchParams;
 use ytracker_api::{
-    auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment, Issue as NativeIssue,
+    auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment,
+    ChecklistItem as NativeChecklistItem, ChecklistItemCreate, ChecklistItemUpdate,
+    ChecklistDeadlineInput,
+    Issue as NativeIssue,
     IssueFieldRef as NativeIssueFieldRef, OrgType, ScrollType, SimpleEntityRaw as NativeSimpleEntity,
     TrackerClient, TrackerConfig, Transition as NativeTransition, UserProfile as NativeUserProfile,
     WorklogEntry as NativeWorklogEntry,
@@ -653,6 +656,117 @@ async fn fetch_worklogs_native(
     let config = ConfigManager::new().load();
     let workday_hours = sanitize_workday_hours(config.workday_hours);
     Ok(convert_worklogs_native(entries, workday_hours))
+}
+
+// ─── Checklist helpers ───────────────────────────────────────────────
+
+fn checklist_item_id_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn convert_checklist_items_native(items: Vec<NativeChecklistItem>) -> Vec<bridge::ChecklistItem> {
+    items
+        .into_iter()
+        .map(|item| bridge::ChecklistItem {
+            id: checklist_item_id_string(&item.id),
+            text: item.text.unwrap_or_default(),
+            checked: item.checked.unwrap_or(false),
+            assignee: item
+                .assignee
+                .as_ref()
+                .and_then(|a| a.display.clone().or_else(|| a.login.clone())),
+            deadline: item.deadline.as_ref().and_then(|d| d.date.clone()),
+            deadline_type: item.deadline.as_ref().and_then(|d| d.deadline_type.clone()),
+            is_exceeded: item.deadline.as_ref().and_then(|d| d.is_exceeded),
+            item_type: item.checklist_item_type,
+        })
+        .collect()
+}
+
+async fn fetch_checklist_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<Vec<bridge::ChecklistItem>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let items = client
+        .get_checklist(issue_key)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_checklist_items_native(items))
+}
+
+async fn add_checklist_item_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    payload: bridge::ChecklistItemCreatePayload,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    let deadline = payload.deadline.as_ref().map(|date| ChecklistDeadlineInput {
+        date: date.clone(),
+        deadline_type: payload.deadline_type.clone(),
+    });
+    let create = ChecklistItemCreate {
+        text: payload.text,
+        checked: payload.checked,
+        assignee: payload.assignee,
+        deadline,
+    };
+    client
+        .add_checklist_item(issue_key, &create)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+async fn edit_checklist_item_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    item_id: &str,
+    payload: bridge::ChecklistItemUpdatePayload,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    let deadline = payload.deadline.as_ref().map(|date| ChecklistDeadlineInput {
+        date: date.clone(),
+        deadline_type: payload.deadline_type.clone(),
+    });
+    let update = ChecklistItemUpdate {
+        text: payload.text,
+        checked: payload.checked,
+        assignee: payload.assignee,
+        deadline,
+    };
+    client
+        .edit_checklist_item(issue_key, item_id, &update)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+async fn delete_checklist_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    client
+        .delete_checklist(issue_key)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+async fn delete_checklist_item_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    item_id: &str,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+    client
+        .delete_checklist_item(issue_key, item_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 async fn fetch_today_logged_seconds_for_issues(
@@ -1594,6 +1708,55 @@ async fn get_issue_worklogs(
 }
 
 #[tauri::command]
+async fn get_checklist(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::ChecklistItem>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_checklist_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn add_checklist_item(
+    issue_key: String,
+    item: bridge::ChecklistItemCreatePayload,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    add_checklist_item_native(secrets_clone, &issue_key, item).await
+}
+
+#[tauri::command]
+async fn edit_checklist_item(
+    issue_key: String,
+    item_id: String,
+    update: bridge::ChecklistItemUpdatePayload,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    edit_checklist_item_native(secrets_clone, &issue_key, &item_id, update).await
+}
+
+#[tauri::command]
+async fn delete_checklist(
+    issue_key: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    delete_checklist_native(secrets_clone, &issue_key).await
+}
+
+#[tauri::command]
+async fn delete_checklist_item(
+    issue_key: String,
+    item_id: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    delete_checklist_item_native(secrets_clone, &issue_key, &item_id).await
+}
+
+#[tauri::command]
 async fn add_comment(
     issue_key: String,
     text: String,
@@ -2053,6 +2216,11 @@ pub fn run() {
             get_issues,
             get_issue,
             get_issue_worklogs,
+            get_checklist,
+            add_checklist_item,
+            edit_checklist_item,
+            delete_checklist,
+            delete_checklist_item,
             get_comments,
             add_comment,
             update_issue,

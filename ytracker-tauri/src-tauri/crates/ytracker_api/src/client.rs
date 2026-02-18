@@ -2,6 +2,9 @@ use crate::config::TrackerConfig;
 use crate::error::{Result, TrackerError};
 use crate::models::{
     AttachmentMetadata,
+    ChecklistItem as TrackerChecklistItem,
+    ChecklistItemCreate,
+    ChecklistItemUpdate,
     Comment as TrackerComment,
     Issue as TrackerIssue,
     SimpleEntityRaw,
@@ -372,6 +375,52 @@ impl TrackerClient {
         }
 
         Ok(result)
+    }
+
+    /// GET /v3/issues/<issue_key>/checklistItems — get checklist items.
+    pub async fn get_checklist(
+        &self,
+        issue_key: &str,
+    ) -> Result<Vec<TrackerChecklistItem>> {
+        let path = format!("issues/{}/checklistItems", issue_key);
+        self.get(&path).await
+    }
+
+    /// POST /v3/issues/<issue_key>/checklistItems — create checklist / add item.
+    pub async fn add_checklist_item(
+        &self,
+        issue_key: &str,
+        item: &ChecklistItemCreate,
+    ) -> Result<Value> {
+        let path = format!("issues/{}/checklistItems", issue_key);
+        self.post(&path, item).await
+    }
+
+    /// PATCH /v3/issues/<issue_key>/checklistItems/<item_id> — edit a checklist item.
+    pub async fn edit_checklist_item(
+        &self,
+        issue_key: &str,
+        item_id: &str,
+        update: &ChecklistItemUpdate,
+    ) -> Result<Value> {
+        let path = format!("issues/{}/checklistItems/{}", issue_key, item_id);
+        self.patch(&path, update).await
+    }
+
+    /// DELETE /v3/issues/<issue_key>/checklistItems — delete entire checklist.
+    pub async fn delete_checklist(&self, issue_key: &str) -> Result<()> {
+        let path = format!("issues/{}/checklistItems", issue_key);
+        self.delete(&path).await
+    }
+
+    /// DELETE /v3/issues/<issue_key>/checklistItems/<item_id> — delete single item.
+    pub async fn delete_checklist_item(
+        &self,
+        issue_key: &str,
+        item_id: &str,
+    ) -> Result<()> {
+        let path = format!("issues/{}/checklistItems/{}", issue_key, item_id);
+        self.delete(&path).await
     }
 
     pub async fn clear_scroll_context(&self, scroll_id: &str) -> Result<()> {
