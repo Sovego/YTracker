@@ -195,7 +195,7 @@ function App() {
         const totals = await Promise.all(
           keys.map(async (key) => {
             try {
-              const entries = await getIssueWorklogs(key);
+              const entries = await getIssueWorklogs(key, { forceRefresh: true });
               return entries.reduce((sum, entry) => {
                 if (!isToday(entry.date)) {
                   return sum;
