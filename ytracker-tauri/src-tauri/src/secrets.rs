@@ -157,7 +157,7 @@ impl SecretsManager {
                     .set_password(&payload)
                     .map_err(|err| format!("Failed to store session in keyring: {err}"))
             }
-            None => match entry.delete_password() {
+            None => match entry.delete_credential() {
                 Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
                 Err(err) => Err(format!("Failed to delete session from keyring: {err}")),
             },
