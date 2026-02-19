@@ -21,7 +21,7 @@ import { IssueDetail } from "./components/IssueDetail";
 import { Login } from "./components/Login";
 import { TimerWidget } from "./components/Timer";
 import { WorkLogDialog } from "./components/WorkLogDialog";
-import { Search, RefreshCw, Settings2, ChevronDown } from "lucide-react";
+import { Search, RefreshCw, Settings2, ChevronDown, Plus } from "lucide-react";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -29,6 +29,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 import { FilterSelect, type FilterOption } from "./components/FilterSelect";
+import { CreateIssueDialog } from "./components/CreateIssueDialog";
 import { formatDurationHuman, getErrorSummary } from "./utils";
 
 /** Default resolution filter that hides resolved/closed issues in main list. */
@@ -81,6 +82,7 @@ function App() {
   const [workLogData, setWorkLogData] = useState<{ key: string, elapsed: number } | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isCreateIssueOpen, setIsCreateIssueOpen] = useState(false);
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [loggedTodaySeconds, setLoggedTodaySeconds] = useState(0);
   const [loadingTodayProgress, setLoadingTodayProgress] = useState(false);
@@ -668,13 +670,22 @@ function App() {
                     {visibleIssues.length} of {issues.length} issues
                   </p>
                 </div>
-                <button
-                  onClick={refreshActiveIssues}
-                  className="p-3 rounded-full bg-white/80 dark:bg-slate-900/70 border border-white/60 dark:border-slate-800/80 text-slate-600 hover:text-blue-600 transition-colors"
-                  title="Refresh"
-                >
-                  <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={refreshActiveIssues}
+                    className="p-3 rounded-full bg-white/80 dark:bg-slate-900/70 border border-white/60 dark:border-slate-800/80 text-slate-600 hover:text-blue-600 transition-colors"
+                    title="Refresh"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                  </button>
+                  <button
+                    onClick={() => setIsCreateIssueOpen(true)}
+                    className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 border border-blue-500 text-white transition-colors"
+                    title="Create issue"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               {catalogsError && (
@@ -796,6 +807,19 @@ function App() {
         <SettingsDialog
           onClose={() => setIsSettingsOpen(false)}
           onLogout={handleLogout}
+        />
+      )}
+
+      {isCreateIssueOpen && (
+        <CreateIssueDialog
+          onClose={() => setIsCreateIssueOpen(false)}
+          onSuccess={(issue) => {
+            setIsCreateIssueOpen(false);
+            setSelectedIssue(issue);
+            setDetailKey(issue.key);
+            // Refresh the issue list to include the newly created issue
+            void refreshActiveIssues();
+          }}
         />
       )}
     </div>

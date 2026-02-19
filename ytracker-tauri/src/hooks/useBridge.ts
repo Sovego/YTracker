@@ -20,6 +20,10 @@ export interface Issue {
     description: string;
     status: { key: string; display: string };
     priority: { key: string; display: string };
+    issue_type?: SimpleEntity | null;
+    assignee?: SimpleEntity | null;
+    tags?: string[];
+    followers?: SimpleEntity[];
     tracked_seconds?: number | null;
 }
 
@@ -408,6 +412,10 @@ let cachedProjectsDirectory: SimpleEntity[] | null = null;
 let projectsDirectoryPromise: Promise<SimpleEntity[]> | null = null;
 let cachedUsersDirectory: UserProfile[] | null = null;
 let usersDirectoryPromise: Promise<UserProfile[]> | null = null;
+let cachedPrioritiesDirectory: SimpleEntity[] | null = null;
+let prioritiesDirectoryPromise: Promise<SimpleEntity[]> | null = null;
+let cachedIssueTypesDirectory: SimpleEntity[] | null = null;
+let issueTypesDirectoryPromise: Promise<SimpleEntity[]> | null = null;
 
 /** Loads queue directory values with cache reuse and promise coalescing. */
 const fetchQueuesDirectory = async (force = false): Promise<SimpleEntity[]> => {
@@ -460,6 +468,42 @@ const fetchUsersDirectory = async (force = false): Promise<UserProfile[]> => {
             }
         });
     usersDirectoryPromise = promise;
+    return promise;
+};
+
+/** Loads priority directory values with cache reuse and promise coalescing. */
+const fetchPrioritiesDirectory = async (force = false): Promise<SimpleEntity[]> => {
+    if (!force && cachedPrioritiesDirectory) return cachedPrioritiesDirectory;
+    if (!force && prioritiesDirectoryPromise) return prioritiesDirectoryPromise;
+    const promise = invoke<SimpleEntity[]>("get_priorities")
+        .then((data) => {
+            cachedPrioritiesDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (prioritiesDirectoryPromise === promise) {
+                prioritiesDirectoryPromise = null;
+            }
+        });
+    prioritiesDirectoryPromise = promise;
+    return promise;
+};
+
+/** Loads issue type directory values with cache reuse and promise coalescing. */
+const fetchIssueTypesDirectory = async (force = false): Promise<SimpleEntity[]> => {
+    if (!force && cachedIssueTypesDirectory) return cachedIssueTypesDirectory;
+    if (!force && issueTypesDirectoryPromise) return issueTypesDirectoryPromise;
+    const promise = invoke<SimpleEntity[]>("get_issue_types")
+        .then((data) => {
+            cachedIssueTypesDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (issueTypesDirectoryPromise === promise) {
+                issueTypesDirectoryPromise = null;
+            }
+        });
+    issueTypesDirectoryPromise = promise;
     return promise;
 };
 
@@ -663,6 +707,71 @@ export function useIssueDetails() {
         invalidateCache(issueKey, "checklist");
     };
 
+    /** Uploads a file to an existing issue and returns attachment metadata. */
+    const uploadAttachment = async (issueKey: string, filePath: string): Promise<Attachment> => {
+        const result = await invoke<Attachment>("upload_attachment", { issueKey, filePath });
+        invalidateCache(issueKey, "attachments");
+        return result;
+    };
+
+    /** Uploads a temporary file attachment (for use during issue creation). */
+    const uploadTempAttachment = async (filePath: string): Promise<Attachment> => {
+        return invoke<Attachment>("upload_temp_attachment", { filePath });
+    };
+
+    /** Creates a new issue in the specified queue. Returns the created issue. */
+    const createIssue = async (params: {
+        queue: string;
+        summary: string;
+        description?: string | null;
+        issueType?: string | null;
+        priority?: string | null;
+        assignee?: string | null;
+        project?: string | null;
+        attachmentIds?: number[] | null;
+    }): Promise<Issue> => {
+        return invoke<Issue>("create_issue", {
+            queue: params.queue,
+            summary: params.summary,
+            description: params.description ?? null,
+            issueType: params.issueType ?? null,
+            priority: params.priority ?? null,
+            assignee: params.assignee ?? null,
+            project: params.project ?? null,
+            attachmentIds: params.attachmentIds ?? null,
+        });
+    };
+
+    /** Updates issue fields with extended field support. */
+    const updateIssueExtended = async (
+        issueKey: string,
+        params: {
+            summary?: string | null;
+            description?: string | null;
+            priority?: string | null;
+            issueType?: string | null;
+            assignee?: string | null;
+            tagsAdd?: string[] | null;
+            tagsRemove?: string[] | null;
+            followersAdd?: string[] | null;
+            followersRemove?: string[] | null;
+        }
+    ): Promise<void> => {
+        await invoke("update_issue_extended", {
+            issueKey,
+            summary: params.summary ?? null,
+            description: params.description ?? null,
+            priority: params.priority ?? null,
+            issueType: params.issueType ?? null,
+            assignee: params.assignee ?? null,
+            tagsAdd: params.tagsAdd ?? null,
+            tagsRemove: params.tagsRemove ?? null,
+            followersAdd: params.followersAdd ?? null,
+            followersRemove: params.followersRemove ?? null,
+        });
+        invalidateCache(issueKey, "all");
+    };
+
     return {
         getIssue,
         getComments,
@@ -685,6 +794,10 @@ export function useIssueDetails() {
         editChecklistItem,
         deleteChecklist,
         deleteChecklistItem,
+        createIssue,
+        updateIssueExtended,
+        uploadAttachment,
+        uploadTempAttachment,
     };
 }
 
@@ -781,8 +894,10 @@ export function useFilterCatalogs(enabled = true) {
     const [queues, setQueues] = useState<SimpleEntity[]>(cachedQueuesDirectory ?? []);
     const [projects, setProjects] = useState<SimpleEntity[]>(cachedProjectsDirectory ?? []);
     const [users, setUsers] = useState<UserProfile[]>(cachedUsersDirectory ?? []);
+    const [priorities, setPriorities] = useState<SimpleEntity[]>(cachedPrioritiesDirectory ?? []);
+    const [issueTypes, setIssueTypes] = useState<SimpleEntity[]>(cachedIssueTypesDirectory ?? []);
     const [loading, setLoading] = useState(
-        enabled && (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory)
+        enabled && (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory || !cachedPrioritiesDirectory || !cachedIssueTypesDirectory)
     );
     const [error, setError] = useState<string | null>(null);
 
@@ -790,15 +905,19 @@ export function useFilterCatalogs(enabled = true) {
         setLoading(true);
         setError(null);
         try {
-            const [queueData, projectData, userData] = await Promise.all([
+            const [queueData, projectData, userData, priorityData, issueTypeData] = await Promise.all([
                 fetchQueuesDirectory(force),
                 fetchProjectsDirectory(force),
                 fetchUsersDirectory(force),
+                fetchPrioritiesDirectory(force),
+                fetchIssueTypesDirectory(force),
             ]);
             setQueues(queueData);
             setProjects(projectData);
             setUsers(userData);
-            return { queueData, projectData, userData };
+            setPriorities(priorityData);
+            setIssueTypes(issueTypeData);
+            return { queueData, projectData, userData, priorityData, issueTypeData };
         } catch (err) {
             const message = String(err);
             setError(message);
@@ -815,7 +934,7 @@ export function useFilterCatalogs(enabled = true) {
             return;
         }
 
-        if (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory) {
+        if (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory || !cachedPrioritiesDirectory || !cachedIssueTypesDirectory) {
             setError(null);
             void refresh();
         } else {
@@ -824,7 +943,7 @@ export function useFilterCatalogs(enabled = true) {
         }
     }, [enabled, refresh]);
 
-    return { queues, projects, users, loading, error, refresh };
+    return { queues, projects, users, priorities, issueTypes, loading, error, refresh };
 }
 
 /**

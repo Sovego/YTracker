@@ -7,6 +7,7 @@ const bridgeMocks = vi.hoisted(() => ({
   getComments: vi.fn(),
   addComment: vi.fn(),
   updateIssue: vi.fn(),
+  updateIssueExtended: vi.fn(),
   getAttachments: vi.fn(),
   downloadAttachment: vi.fn(),
   previewAttachment: vi.fn(),
@@ -20,6 +21,7 @@ const bridgeMocks = vi.hoisted(() => ({
   editChecklistItem: vi.fn(),
   deleteChecklist: vi.fn(),
   deleteChecklistItem: vi.fn(),
+  createIssue: vi.fn(),
 }));
 
 vi.mock("../hooks/useBridge", async (importOriginal) => {
@@ -28,6 +30,16 @@ vi.mock("../hooks/useBridge", async (importOriginal) => {
     ...actual,
     useIssueDetails: () => ({
       ...bridgeMocks,
+    }),
+    useFilterCatalogs: () => ({
+      queues: [],
+      projects: [],
+      users: [],
+      priorities: [{ key: "2", display: "Normal" }],
+      issueTypes: [{ key: "task", display: "Task" }],
+      loading: false,
+      error: null,
+      refresh: vi.fn(),
     }),
   };
 });
@@ -71,6 +83,7 @@ describe("IssueDetail", () => {
     bridgeMocks.getIssueWorklogs.mockResolvedValue([]);
     bridgeMocks.getResolutions.mockResolvedValue([{ key: "fixed", display: "Fixed" }]);
     bridgeMocks.updateIssue.mockResolvedValue(null);
+    bridgeMocks.updateIssueExtended.mockResolvedValue(undefined);
     bridgeMocks.addComment.mockResolvedValue(null);
     bridgeMocks.executeTransition.mockResolvedValue(null);
 
@@ -159,7 +172,10 @@ describe("IssueDetail", () => {
     fireEvent.click(screen.getByTitle("Save changes"));
 
     await waitFor(() => {
-      expect(bridgeMocks.updateIssue).toHaveBeenCalledWith("YT-500", "Updated summary", "Some description");
+      expect(bridgeMocks.updateIssueExtended).toHaveBeenCalledWith("YT-500", expect.objectContaining({
+        summary: "Updated summary",
+        description: "Some description",
+      }));
       expect(onIssueUpdate).toHaveBeenCalledTimes(1);
     });
   });

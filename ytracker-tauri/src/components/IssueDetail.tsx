@@ -2,14 +2,16 @@
  * Detailed issue pane with editing, comments, attachments, transitions,
  * worklogs, and checklist operations.
  */
-import { Issue, TimerState, useIssueDetails, Comment, Attachment, Transition, SimpleEntity, WorklogEntry, ChecklistItem } from "../hooks/useBridge";
+import { Issue, TimerState, useIssueDetails, useFilterCatalogs, Comment, Attachment, Transition, SimpleEntity, WorklogEntry, ChecklistItem } from "../hooks/useBridge";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Play, Square, Edit2, Save, X, Download, MessageSquare, Paperclip, ChevronDown, Send, Eye, Loader2 } from "lucide-react";
+import { Play, Square, Edit2, Save, X, Download, MessageSquare, Paperclip, ChevronDown, Send, Eye, Loader2, Plus, Tag, Users } from "lucide-react";
 import { useState, useEffect, useRef, useCallback, ImgHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
+import { open } from "@tauri-apps/plugin-dialog";
 import { formatDurationHuman, getErrorSummary } from "../utils";
 import { Checklist } from "./Checklist";
+import { MarkdownEditor } from "./MarkdownEditor";
 
 const STATUS_CHIPS: Record<string, { dot: string; pill: string; glow: string }> = {
     open: {
@@ -129,7 +131,8 @@ interface IssueDetailProps {
  * Renders issue details and issue-level actions for the selected item.
  */
 export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate }: IssueDetailProps) {
-    const { getIssue, getComments, addComment, updateIssue, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions, getChecklist, addChecklistItem, editChecklistItem, deleteChecklist, deleteChecklistItem } = useIssueDetails();
+    const { getIssue, getComments, addComment, updateIssueExtended, uploadAttachment, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions, getChecklist, addChecklistItem, editChecklistItem, deleteChecklist, deleteChecklistItem } = useIssueDetails();
+    const { priorities, issueTypes, users } = useFilterCatalogs();
 
     const [comments, setComments] = useState<Comment[]>([]);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -149,6 +152,12 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
     const [isEditing, setIsEditing] = useState(false);
     const [editSummary, setEditSummary] = useState("");
     const [editDescription, setEditDescription] = useState("");
+    const [editPriority, setEditPriority] = useState("");
+    const [editIssueType, setEditIssueType] = useState("");
+    const [editAssignee, setEditAssignee] = useState("");
+    const [editTags, setEditTags] = useState<string[]>([]);
+    const [editFollowers, setEditFollowers] = useState<string[]>([]);
+    const [newTag, setNewTag] = useState("");
 
     const [loadingDetails, setLoadingDetails] = useState(false);
     const [worklogs, setWorklogs] = useState<WorklogEntry[]>([]);
@@ -162,6 +171,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
     const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
     const [previewError, setPreviewError] = useState<string | null>(null);
     const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false);
+    const [uploadingAttachment, setUploadingAttachment] = useState(false);
     const [statusMenuPosition, setStatusMenuPosition] = useState<{ top: number; left: number; width: number } | null>(null);
     const statusMenuRef = useRef<HTMLDivElement | null>(null);
     const statusButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -250,6 +260,12 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
             setIssueDetails(issue);
             setEditSummary(issue.summary);
             setEditDescription(issue.description);
+            setEditPriority(issue.priority?.key ?? "");
+            setEditIssueType(issue.issue_type?.key ?? "");
+            setEditAssignee(issue.assignee?.key ?? "");
+            setEditTags(issue.tags ?? []);
+            setEditFollowers((issue.followers ?? []).map(f => f.key));
+            setNewTag("");
             setIsEditing(false);
             closeStatusMenu();
             // Load details asynchronously without blocking render
@@ -319,11 +335,28 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         };
     }, [isStatusMenuOpen, closeStatusMenu, updateStatusMenuPosition]);
 
-    /** Persists edited summary/description and requests parent issue refresh. */
+    /** Persists edited fields and requests parent issue refresh. */
     const handleSave = async () => {
         if (!activeIssue) return;
         try {
-            await updateIssue(activeIssue.key, editSummary, editDescription);
+            const origTags = activeIssue.tags ?? [];
+            const origFollowers = (activeIssue.followers ?? []).map(f => f.key);
+            const tagsAdd = editTags.filter(t => !origTags.includes(t));
+            const tagsRemove = origTags.filter(t => !editTags.includes(t));
+            const followersAdd = editFollowers.filter(f => !origFollowers.includes(f));
+            const followersRemove = origFollowers.filter(f => !editFollowers.includes(f));
+
+            await updateIssueExtended(activeIssue.key, {
+                summary: editSummary,
+                description: editDescription,
+                priority: editPriority || null,
+                issueType: editIssueType || null,
+                assignee: editAssignee || null,
+                tagsAdd: tagsAdd.length > 0 ? tagsAdd : null,
+                tagsRemove: tagsRemove.length > 0 ? tagsRemove : null,
+                followersAdd: followersAdd.length > 0 ? followersAdd : null,
+                followersRemove: followersRemove.length > 0 ? followersRemove : null,
+            });
             setIsEditing(false);
             onIssueUpdate(); // Refresh parent
         } catch (e) {
@@ -343,6 +376,50 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         } catch (e) {
             console.error(`Failed to add comment (${getErrorSummary(e)})`);
             alert("Failed to add comment");
+        }
+    };
+
+    /** Opens a native file picker and uploads the selected file to the issue. */
+    const handleUploadAttachment = async () => {
+        if (!activeIssue) return;
+        try {
+            const selected = await open({ multiple: false, title: "Attach file" });
+            if (!selected) return;
+            const filePath = typeof selected === "string" ? selected : selected;
+            setUploadingAttachment(true);
+            await uploadAttachment(activeIssue.key, filePath);
+            const refreshed = await getAttachments(activeIssue.key, { forceRefresh: true });
+            setAttachments(refreshed);
+        } catch (e) {
+            console.error(`Failed to upload attachment (${getErrorSummary(e)})`);
+            alert("Failed to upload attachment");
+        } finally {
+            setUploadingAttachment(false);
+        }
+    };
+
+    /** Handles image attach from the MarkdownEditor toolbar. Returns markdown image text. */
+    const handleAttachImage = async (): Promise<string | null> => {
+        if (!activeIssue) return null;
+        try {
+            const selected = await open({
+                multiple: false,
+                title: "Attach image",
+                filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "svg", "webp"] }],
+            });
+            if (!selected) return null;
+            const filePath = typeof selected === "string" ? selected : selected;
+            setUploadingAttachment(true);
+            const attachment = await uploadAttachment(activeIssue.key, filePath);
+            const refreshed = await getAttachments(activeIssue.key, { forceRefresh: true });
+            setAttachments(refreshed);
+            return `![${attachment.name}](${attachment.url})`;
+        } catch (e) {
+            console.error(`Failed to attach image (${getErrorSummary(e)})`);
+            alert("Failed to attach image");
+            return null;
+        } finally {
+            setUploadingAttachment(false);
         }
     };
 
@@ -728,10 +805,68 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                         </div>
                         <div className="gtk-card p-5">
                             <p className="gtk-section-title mb-2">Priority</p>
-                            <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                                {activeIssue.priority.display}
-                            </div>
-                            <p className="text-xs text-slate-500 mt-2">Key: {activeIssue.priority.key}</p>
+                            {isEditing ? (
+                                <select
+                                    value={editPriority}
+                                    onChange={(e) => setEditPriority(e.target.value)}
+                                    className="w-full px-2 py-1.5 text-sm bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                                >
+                                    <option value="">—</option>
+                                    {priorities.map((p) => (
+                                        <option key={p.key} value={p.key}>{p.display}</option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <>
+                                    <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                        {activeIssue.priority?.display ?? "—"}
+                                    </div>
+                                    {activeIssue.priority?.key && (
+                                        <p className="text-xs text-slate-500 mt-2">Key: {activeIssue.priority.key}</p>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                        <div className="gtk-card p-5">
+                            <p className="gtk-section-title mb-2">Type</p>
+                            {isEditing ? (
+                                <select
+                                    value={editIssueType}
+                                    onChange={(e) => setEditIssueType(e.target.value)}
+                                    className="w-full px-2 py-1.5 text-sm bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                                >
+                                    <option value="">—</option>
+                                    {issueTypes.map((t) => (
+                                        <option key={t.key} value={t.key}>{t.display}</option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                    {activeIssue.issue_type?.display ?? "—"}
+                                </div>
+                            )}
+                        </div>
+                    </section>
+
+                    <section className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="gtk-card p-5">
+                            <p className="gtk-section-title mb-2">Assignee</p>
+                            {isEditing ? (
+                                <select
+                                    value={editAssignee}
+                                    onChange={(e) => setEditAssignee(e.target.value)}
+                                    className="w-full px-2 py-1.5 text-sm bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                                >
+                                    <option value="">Unassigned</option>
+                                    {users.map((u) => (
+                                        <option key={u.login ?? u.display} value={u.login ?? ""}>{u.display ?? u.login}</option>
+                                    ))}
+                                </select>
+                            ) : (
+                                <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                                    {activeIssue.assignee?.display ?? "Unassigned"}
+                                </div>
+                            )}
                         </div>
                         <div className="gtk-card p-5">
                             <p className="gtk-section-title mb-2">Timer</p>
@@ -742,6 +877,124 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                                 Elapsed: {formatDurationHuman(timerState.elapsed)}
                             </p>
                         </div>
+                        <div className="gtk-card p-5">
+                            <p className="gtk-section-title mb-2 flex items-center gap-1.5">
+                                <Users className="w-3.5 h-3.5" /> Followers
+                            </p>
+                            {isEditing ? (
+                                <div className="space-y-2">
+                                    <div className="flex flex-wrap gap-1">
+                                        {editFollowers.map((fKey) => {
+                                            const user = users.find(u => u.login === fKey);
+                                            return (
+                                                <span key={fKey} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 rounded-full text-xs">
+                                                    {user?.display ?? fKey}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setEditFollowers(prev => prev.filter(f => f !== fKey))}
+                                                        className="text-blue-400 hover:text-blue-600"
+                                                    >
+                                                        <X className="w-3 h-3" />
+                                                    </button>
+                                                </span>
+                                            );
+                                        })}
+                                    </div>
+                                    <select
+                                        value=""
+                                        onChange={(e) => {
+                                            if (e.target.value && !editFollowers.includes(e.target.value)) {
+                                                setEditFollowers(prev => [...prev, e.target.value]);
+                                            }
+                                        }}
+                                        className="w-full px-2 py-1 text-xs bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md outline-none"
+                                    >
+                                        <option value="">Add follower…</option>
+                                        {users.filter(u => u.login && !editFollowers.includes(u.login)).map((u) => (
+                                            <option key={u.login} value={u.login ?? ""}>{u.display ?? u.login}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            ) : (
+                                <div className="flex flex-wrap gap-1">
+                                    {(activeIssue.followers ?? []).length > 0
+                                        ? (activeIssue.followers ?? []).map(f => (
+                                            <span key={f.key} className="inline-block px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-full text-xs">
+                                                {f.display}
+                                            </span>
+                                        ))
+                                        : <span className="text-xs text-slate-400">None</span>
+                                    }
+                                </div>
+                            )}
+                        </div>
+                    </section>
+
+                    {/* Tags section */}
+                    <section className="gtk-card p-5">
+                        <p className="gtk-section-title mb-2 flex items-center gap-1.5">
+                            <Tag className="w-3.5 h-3.5" /> Tags
+                        </p>
+                        {isEditing ? (
+                            <div className="space-y-2">
+                                <div className="flex flex-wrap gap-1.5">
+                                    {editTags.map((tag) => (
+                                        <span key={tag} className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-full text-xs">
+                                            {tag}
+                                            <button
+                                                type="button"
+                                                onClick={() => setEditTags(prev => prev.filter(t => t !== tag))}
+                                                className="text-slate-400 hover:text-red-500"
+                                            >
+                                                <X className="w-3 h-3" />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={newTag}
+                                        onChange={(e) => setNewTag(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter" && newTag.trim()) {
+                                                e.preventDefault();
+                                                if (!editTags.includes(newTag.trim())) {
+                                                    setEditTags(prev => [...prev, newTag.trim()]);
+                                                }
+                                                setNewTag("");
+                                            }
+                                        }}
+                                        placeholder="Add tag…"
+                                        className="flex-1 px-2 py-1 text-xs bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (newTag.trim() && !editTags.includes(newTag.trim())) {
+                                                setEditTags(prev => [...prev, newTag.trim()]);
+                                                setNewTag("");
+                                            }
+                                        }}
+                                        className="p-1 text-blue-500 hover:text-blue-700"
+                                        title="Add tag"
+                                    >
+                                        <Plus className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                                {(activeIssue.tags ?? []).length > 0
+                                    ? (activeIssue.tags ?? []).map(tag => (
+                                        <span key={tag} className="inline-block px-2.5 py-1 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-full text-xs">
+                                            {tag}
+                                        </span>
+                                    ))
+                                    : <span className="text-xs text-slate-400">No tags</span>
+                                }
+                            </div>
+                        )}
                     </section>
 
                     <section className="gtk-card p-6 space-y-4">
@@ -752,10 +1005,12 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                             )}
                         </div>
                         {isEditing ? (
-                            <textarea
+                            <MarkdownEditor
                                 value={editDescription}
-                                onChange={e => setEditDescription(e.target.value)}
-                                className="w-full h-64 rounded-2xl border border-white/60 dark:border-slate-800/70 bg-white/80 dark:bg-slate-900/60 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                onChange={setEditDescription}
+                                placeholder="Issue description..."
+                                minRows={10}
+                                onAttachImage={handleAttachImage}
                             />
                         ) : (
                             <div className="prose prose-slate max-w-none dark:prose-invert">
@@ -777,16 +1032,31 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                         onDeleteChecklist={deleteChecklist}
                     />
 
-                    {attachments.length > 0 && (
-                        <section className="gtk-card p-6">
-                            <div className="flex items-center justify-between mb-4">
-                                <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">
-                                    <Paperclip className="w-4 h-4" /> Attachments
-                                </h3>
+                    <section className="gtk-card p-6">
+                        <div className="flex items-center justify-between mb-4">
+                            <h3 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">
+                                <Paperclip className="w-4 h-4" /> Attachments
+                            </h3>
+                            <div className="flex items-center gap-2">
                                 <span className="text-xs text-slate-400">{attachments.length} files</span>
+                                <button
+                                    onClick={handleUploadAttachment}
+                                    disabled={uploadingAttachment}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+                                    title="Attach file"
+                                >
+                                    {uploadingAttachment ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                        <Plus className="w-3.5 h-3.5" />
+                                    )}
+                                    Attach
+                                </button>
                             </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {attachments.map(att => (
+                        </div>
+                        {attachments.length > 0 && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {attachments.map(att => (
                                     <div key={att.id} className="flex items-center justify-between gap-3 px-4 py-3 rounded-2xl border border-white/60 dark:border-slate-800/60 bg-white/70 dark:bg-slate-900/50">
                                         <div className="min-w-0">
                                             <span className="block truncate text-sm font-medium text-slate-700 dark:text-slate-200" title={att.name}>{att.name}</span>
@@ -815,8 +1085,8 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                                     </div>
                                 ))}
                             </div>
-                        </section>
-                    )}
+                        )}
+                    </section>
 
                     <section className="gtk-card p-6">
                         <div className="flex items-center justify-between mb-6">
@@ -870,11 +1140,12 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                         </div>
 
                         <div className="flex flex-col gap-3">
-                            <textarea
+                            <MarkdownEditor
                                 value={newComment}
-                                onChange={e => setNewComment(e.target.value)}
+                                onChange={setNewComment}
                                 placeholder="Write a comment..."
-                                className="w-full min-h-[90px] rounded-2xl border border-white/60 dark:border-slate-800/60 bg-white/80 dark:bg-slate-900/70 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                minRows={4}
+                                onAttachImage={handleAttachImage}
                             />
                             <div className="flex justify-end">
                                 <button
@@ -972,11 +1243,12 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                                 <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
                                     Comment (optional)
                                 </label>
-                                <textarea
+                                <MarkdownEditor
                                     value={transitionDialog.comment}
-                                    onChange={e => setTransitionDialog(prev => ({ ...prev, comment: e.target.value }))}
+                                    onChange={(val) => setTransitionDialog(prev => ({ ...prev, comment: val }))}
                                     placeholder="Add a comment..."
-                                    className="w-full h-32 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                                    minRows={4}
+                                    onAttachImage={handleAttachImage}
                                 />
                             </div>
                         </div>

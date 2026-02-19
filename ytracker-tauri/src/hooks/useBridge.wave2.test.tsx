@@ -27,6 +27,8 @@ describe("useBridge wave2", () => {
       if (command === "get_queues") return [{ key: "Q1", display: "Queue 1" }];
       if (command === "get_projects") return [{ key: "P1", display: "Project 1" }];
       if (command === "get_users") return [{ login: "alice", display: "Alice" }];
+      if (command === "get_priorities") return [{ key: "2", display: "Normal" }];
+      if (command === "get_issue_types") return [{ key: "task", display: "Task" }];
       throw new Error(`Unexpected command: ${String(command)}`);
     });
 

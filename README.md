@@ -23,9 +23,9 @@ YTracker includes an auto-update feature. When a new version is available, you w
 - [x] Timer functionality for tracking work time
 - [x] Checklist support in issue details
 - [x] Worklog progress bar
-- [ ] Create and edit issues
-- [ ] Attach files to issues
-- [ ] Markdown editor in comments and descriptions
+- [x] Create and edit issues
+- [x] Attach files to issues
+- [x] Markdown editor in comments and descriptions
 - [ ] Push notifications for issue updates
 - [ ] Localization support for multiple languages
 - [ ] Light and dark themes

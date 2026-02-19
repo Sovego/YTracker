@@ -36,12 +36,12 @@ use secrets::{ClientCredentialsInfo, SecretsManager, SessionToken};
 use timer::Timer;
 use ytracker_api::models::CommentAuthor as NativeCommentAuthor;
 use ytracker_api::rate_limiter::RateLimiter;
-use ytracker_api::client::IssueSearchParams;
+use ytracker_api::client::{FieldRefInput, IssueSearchParams, IssueUpdateExtendedRequest, ListUpdate};
 use ytracker_api::{
     auth, AttachmentMetadata as NativeAttachment, Comment as NativeComment,
     ChecklistItem as NativeChecklistItem, ChecklistItemCreate, ChecklistItemUpdate,
     ChecklistDeadlineInput,
-    Issue as NativeIssue,
+    Issue as NativeIssue, IssueCreateRequest,
     IssueFieldRef as NativeIssueFieldRef, OrgType, ScrollType, SimpleEntityRaw as NativeSimpleEntity,
     TrackerClient, TrackerConfig, Transition as NativeTransition, UserProfile as NativeUserProfile,
     WorklogEntry as NativeWorklogEntry,
@@ -541,6 +541,31 @@ fn convert_issue_native(issue: NativeIssue, workday_hours: u64) -> bridge::Issue
     let (status_key, status_display) = coerce_field_ref(issue.status.as_ref());
     let (priority_key, priority_display) = coerce_field_ref(issue.priority.as_ref());
 
+    let issue_type = issue.issue_type.as_ref().map(|field| {
+        let (key, display) = coerce_field_ref(Some(field));
+        bridge::SimpleEntity { key, display }
+    });
+
+    let assignee = issue.assignee.as_ref().map(|field| {
+        let (key, display) = coerce_field_ref(Some(field));
+        bridge::SimpleEntity { key, display }
+    });
+
+    let tags = issue.tags.clone().unwrap_or_default();
+
+    let followers = issue
+        .followers
+        .as_ref()
+        .map(|list| {
+            list.iter()
+                .map(|field| {
+                    let (key, display) = coerce_field_ref(Some(field));
+                    bridge::SimpleEntity { key, display }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     bridge::Issue {
         key: issue.key,
         summary: issue.summary.unwrap_or_default(),
@@ -553,6 +578,10 @@ fn convert_issue_native(issue: NativeIssue, workday_hours: u64) -> bridge::Issue
             key: priority_key,
             display: priority_display,
         },
+        issue_type,
+        assignee,
+        tags,
+        followers,
         tracked_seconds: issue
             .spent
             .as_ref()
@@ -950,6 +979,161 @@ async fn fetch_users_native(
     Ok(users.into_iter().map(convert_user_profile).collect())
 }
 
+/// Fetches global priority catalog.
+async fn fetch_priorities_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let priorities = client
+        .get_priorities()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_simple_entities_native(priorities))
+}
+
+/// Fetches global issue type catalog.
+async fn fetch_issue_types_native(
+    secrets: SecretsManager,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let client = build_tracker_client(&secrets)?;
+    let types = client
+        .get_issue_types()
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_simple_entities_native(types))
+}
+
+/// Creates a new issue in Tracker.
+async fn create_issue_native(
+    secrets: SecretsManager,
+    queue: &str,
+    summary: &str,
+    description: Option<&str>,
+    issue_type: Option<&str>,
+    priority: Option<&str>,
+    assignee: Option<&str>,
+    project: Option<&str>,
+    attachment_ids: Option<Vec<i64>>,
+) -> Result<bridge::Issue, String> {
+    if queue.trim().is_empty() {
+        return Err("Queue cannot be empty".to_string());
+    }
+    if summary.trim().is_empty() {
+        return Err("Summary cannot be empty".to_string());
+    }
+    let client = build_tracker_client(&secrets)?;
+    let payload = IssueCreateRequest {
+        queue: queue.trim().to_string(),
+        summary: summary.trim().to_string(),
+        description: description.map(|d| d.to_string()),
+        issue_type: issue_type.map(|t| t.to_string()),
+        priority: priority.map(|p| p.to_string()),
+        assignee: assignee.map(|a| a.to_string()),
+        project: project.map(|p| p.to_string()),
+        attachment_ids,
+    };
+    let issue = client
+        .create_issue(&payload)
+        .await
+        .map_err(|err| err.to_string())?;
+    let config = ConfigManager::new().load();
+    let workday_hours = sanitize_workday_hours(config.workday_hours);
+    Ok(convert_issue_native(issue, workday_hours))
+}
+
+/// Updates issue fields with extended field set.
+async fn update_issue_extended_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    summary: Option<&str>,
+    description: Option<&str>,
+    priority: Option<&str>,
+    issue_type: Option<&str>,
+    assignee: Option<&str>,
+    tags_add: Option<Vec<String>>,
+    tags_remove: Option<Vec<String>>,
+    followers_add: Option<Vec<String>>,
+    followers_remove: Option<Vec<String>>,
+) -> Result<(), String> {
+    let client = build_tracker_client(&secrets)?;
+
+    let priority_ref = priority.map(|key| FieldRefInput { key });
+    let type_ref = issue_type.map(|key| FieldRefInput { key });
+
+    let tags = if tags_add.is_some() || tags_remove.is_some() {
+        Some(ListUpdate {
+            add: tags_add.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect()),
+            remove: tags_remove.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect()),
+        })
+    } else {
+        None
+    };
+
+    let followers = if followers_add.is_some() || followers_remove.is_some() {
+        Some(ListUpdate {
+            add: followers_add.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect()),
+            remove: followers_remove.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect()),
+        })
+    } else {
+        None
+    };
+
+    let payload = IssueUpdateExtendedRequest {
+        summary,
+        description,
+        priority: priority_ref,
+        issue_type: type_ref,
+        assignee,
+        tags,
+        followers,
+    };
+
+    client
+        .update_issue_extended(issue_key, &payload)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Uploads a file attachment to a specific issue and returns bridge-compatible metadata.
+async fn upload_attachment_native(
+    secrets: SecretsManager,
+    issue_key: &str,
+    file_name: &str,
+    file_bytes: Vec<u8>,
+    mime_type: Option<&str>,
+) -> Result<bridge::Attachment, String> {
+    let client = build_tracker_client(&secrets)?;
+    let attachment = client
+        .upload_attachment(
+            issue_key,
+            file_name.to_string(),
+            file_bytes,
+            mime_type.map(|s| s.to_string()),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_single_attachment_native(attachment))
+}
+
+/// Uploads a temporary attachment (not linked to any issue) and returns bridge-compatible metadata.
+async fn upload_temp_attachment_native(
+    secrets: SecretsManager,
+    file_name: &str,
+    file_bytes: Vec<u8>,
+    mime_type: Option<&str>,
+) -> Result<bridge::Attachment, String> {
+    let client = build_tracker_client(&secrets)?;
+    let attachment = client
+        .upload_temp_attachment(
+            file_name.to_string(),
+            file_bytes,
+            mime_type.map(|s| s.to_string()),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(convert_single_attachment_native(attachment))
+}
+
 async fn release_scroll_context_native(
     app: &tauri::AppHandle,
     scroll_id: &str,
@@ -980,17 +1164,22 @@ fn convert_comments_native(comments: Vec<NativeComment>) -> Vec<bridge::Comment>
 fn convert_attachments_native(attachments: Vec<NativeAttachment>) -> Vec<bridge::Attachment> {
     attachments
         .into_iter()
-        .map(|attachment| bridge::Attachment {
-            id: coerce_display_value(&attachment.id).unwrap_or_default(),
-            name: attachment
-                .name
-                .as_ref()
-                .and_then(coerce_display_value)
-                .unwrap_or_else(|| "Attachment".to_string()),
-            url: attachment.content.unwrap_or_default(),
-            mime_type: attachment.mime_type.or(attachment.mimetype),
-        })
+        .map(|attachment| convert_single_attachment_native(attachment))
         .collect()
+}
+
+/// Converts a single native attachment metadata into a bridge-compatible Attachment DTO.
+fn convert_single_attachment_native(attachment: NativeAttachment) -> bridge::Attachment {
+    bridge::Attachment {
+        id: coerce_display_value(&attachment.id).unwrap_or_default(),
+        name: attachment
+            .name
+            .as_ref()
+            .and_then(coerce_display_value)
+            .unwrap_or_else(|| "Attachment".to_string()),
+        url: attachment.content.unwrap_or_default(),
+        mime_type: attachment.mime_type.or(attachment.mimetype),
+    }
 }
 
 async fn find_attachment_metadata(
@@ -1924,6 +2113,49 @@ async fn get_attachments(
     fetch_attachments_native(secrets_clone, &issue_key).await
 }
 
+/// Uploads a file to an existing issue and returns the created attachment metadata.
+#[tauri::command]
+async fn upload_attachment(
+    issue_key: String,
+    file_path: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::Attachment, String> {
+    let path = std::path::Path::new(&file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let file_bytes = std::fs::read(&file_path)
+        .map_err(|err| format!("Failed to read file: {}", err))?;
+    let mime_type = mime_guess::from_path(path)
+        .first()
+        .map(|m| m.to_string());
+    let secrets_clone = secrets.inner().clone();
+    upload_attachment_native(secrets_clone, &issue_key, &file_name, file_bytes, mime_type.as_deref()).await
+}
+
+/// Uploads a temporary file attachment (not linked to any issue) for use during issue creation.
+#[tauri::command]
+async fn upload_temp_attachment(
+    file_path: String,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::Attachment, String> {
+    let path = std::path::Path::new(&file_path);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let file_bytes = std::fs::read(&file_path)
+        .map_err(|err| format!("Failed to read file: {}", err))?;
+    let mime_type = mime_guess::from_path(path)
+        .first()
+        .map(|m| m.to_string());
+    let secrets_clone = secrets.inner().clone();
+    upload_temp_attachment_native(secrets_clone, &file_name, file_bytes, mime_type.as_deref()).await
+}
+
 /// Returns catalog of Tracker statuses for filters/forms.
 #[tauri::command]
 async fn get_statuses(
@@ -1967,6 +2199,84 @@ async fn get_users(
 ) -> Result<Vec<bridge::UserProfile>, String> {
     let secrets_clone = secrets.inner().clone();
     fetch_users_native(secrets_clone).await
+}
+
+/// Returns catalog of Tracker priorities for filters/forms.
+#[tauri::command]
+async fn get_priorities(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_priorities_native(secrets_clone).await
+}
+
+/// Returns catalog of Tracker issue types for filters/forms.
+#[tauri::command]
+async fn get_issue_types(
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<Vec<bridge::SimpleEntity>, String> {
+    let secrets_clone = secrets.inner().clone();
+    fetch_issue_types_native(secrets_clone).await
+}
+
+/// Creates a new issue in the specified queue.
+#[tauri::command]
+async fn create_issue(
+    queue: String,
+    summary: String,
+    description: Option<String>,
+    issue_type: Option<String>,
+    priority: Option<String>,
+    assignee: Option<String>,
+    project: Option<String>,
+    attachment_ids: Option<Vec<i64>>,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<bridge::Issue, String> {
+    let secrets_clone = secrets.inner().clone();
+    create_issue_native(
+        secrets_clone,
+        &queue,
+        &summary,
+        description.as_deref(),
+        issue_type.as_deref(),
+        priority.as_deref(),
+        assignee.as_deref(),
+        project.as_deref(),
+        attachment_ids,
+    )
+    .await
+}
+
+/// Updates issue fields with extended field support (priority, type, assignee, tags, followers).
+#[tauri::command]
+async fn update_issue_extended(
+    issue_key: String,
+    summary: Option<String>,
+    description: Option<String>,
+    priority: Option<String>,
+    issue_type: Option<String>,
+    assignee: Option<String>,
+    tags_add: Option<Vec<String>>,
+    tags_remove: Option<Vec<String>>,
+    followers_add: Option<Vec<String>>,
+    followers_remove: Option<Vec<String>>,
+    secrets: tauri::State<'_, SecretsManager>,
+) -> Result<(), String> {
+    let secrets_clone = secrets.inner().clone();
+    update_issue_extended_native(
+        secrets_clone,
+        &issue_key,
+        summary.as_deref(),
+        description.as_deref(),
+        priority.as_deref(),
+        issue_type.as_deref(),
+        assignee.as_deref(),
+        tags_add,
+        tags_remove,
+        followers_add,
+        followers_remove,
+    )
+    .await
 }
 
 /// Releases backend scroll context for a previously paged issue query.
@@ -2374,12 +2684,18 @@ pub fn run() {
             get_comments,
             add_comment,
             update_issue,
+            update_issue_extended,
+            create_issue,
             get_attachments,
+            upload_attachment,
+            upload_temp_attachment,
             get_statuses,
             get_resolutions,
             get_queues,
             get_projects,
             get_users,
+            get_priorities,
+            get_issue_types,
             release_scroll_context,
             download_attachment,
             preview_attachment,

@@ -70,6 +70,8 @@ vi.mock("./hooks/useBridge", () => ({
     queues: [],
     projects: [],
     users: [],
+    priorities: [],
+    issueTypes: [],
     loading: false,
     error: null,
     refresh: bridgeState.refreshCatalogsMock,

@@ -13,6 +13,10 @@ pub struct Issue {
     pub description: String,
     pub status: Status,
     pub priority: Priority,
+    pub issue_type: Option<SimpleEntity>,
+    pub assignee: Option<SimpleEntity>,
+    pub tags: Vec<String>,
+    pub followers: Vec<SimpleEntity>,
     pub tracked_seconds: Option<u64>,
 }
 

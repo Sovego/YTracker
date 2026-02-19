@@ -9,6 +9,7 @@ use crate::models::{
     ChecklistItemUpdate,
     Comment as TrackerComment,
     Issue as TrackerIssue,
+    IssueCreateRequest,
     SimpleEntityRaw,
     Transition as TrackerTransition,
     UserProfile,
@@ -295,6 +296,52 @@ impl TrackerClient {
         self.get(&path).await
     }
 
+    /// Uploads a file attachment to an existing issue via multipart/form-data.
+    /// Returns the attachment metadata for the newly uploaded file.
+    pub async fn upload_attachment(
+        &self,
+        issue_key: &str,
+        file_name: String,
+        file_bytes: Vec<u8>,
+        mime_type: Option<String>,
+    ) -> Result<AttachmentMetadata> {
+        self.limiter.hit().await;
+        let path = format!("issues/{}/attachments/", issue_key);
+        let url = self.url_for(&path);
+
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name)
+            .mime_str(mime_type.as_deref().unwrap_or("application/octet-stream"))
+            .map_err(|err| TrackerError::Other(err.to_string()))?;
+
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self.http.post(url).multipart(form).send().await?;
+        Self::parse_json(response).await
+    }
+
+    /// Uploads a temporary attachment (not yet linked to any issue).
+    /// Returns attachment metadata, including the `id` needed for issue creation.
+    pub async fn upload_temp_attachment(
+        &self,
+        file_name: String,
+        file_bytes: Vec<u8>,
+        mime_type: Option<String>,
+    ) -> Result<AttachmentMetadata> {
+        self.limiter.hit().await;
+        let url = self.url_for("attachments/");
+
+        let part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name)
+            .mime_str(mime_type.as_deref().unwrap_or("application/octet-stream"))
+            .map_err(|err| TrackerError::Other(err.to_string()))?;
+
+        let form = reqwest::multipart::Form::new().part("file", part);
+
+        let response = self.http.post(url).multipart(form).send().await?;
+        Self::parse_json(response).await
+    }
+
     /// Returns global status directory entries.
     pub async fn get_statuses(&self) -> Result<Vec<SimpleEntityRaw>> {
         self.get("statuses").await
@@ -322,6 +369,34 @@ impl TrackerClient {
         let path = format!("issues/{}", issue_key);
         let payload = IssueUpdateRequest { summary, description };
         self.send_expect_empty(Method::PATCH, &path, Some(&payload)).await
+    }
+
+    /// Updates issue fields including priority, type, assignee, tags and followers.
+    pub async fn update_issue_extended(
+        &self,
+        issue_key: &str,
+        payload: &IssueUpdateExtendedRequest<'_>,
+    ) -> Result<()> {
+        let path = format!("issues/{}", issue_key);
+        self.send_expect_empty(Method::PATCH, &path, Some(payload)).await
+    }
+
+    /// Creates a new issue via `POST /v3/issues/`.
+    pub async fn create_issue(
+        &self,
+        payload: &IssueCreateRequest,
+    ) -> Result<TrackerIssue> {
+        self.post("issues", payload).await
+    }
+
+    /// Returns global priority directory entries.
+    pub async fn get_priorities(&self) -> Result<Vec<SimpleEntityRaw>> {
+        self.get("priorities").await
+    }
+
+    /// Returns global issue type directory entries.
+    pub async fn get_issue_types(&self) -> Result<Vec<SimpleEntityRaw>> {
+        self.get("issuetypes").await
     }
 
     /// Returns available workflow transitions for an issue.
@@ -730,7 +805,7 @@ impl IssueSearchParams {
     }
 }
 
-const ISSUE_SUMMARY_FIELDS: &str = "key,summary,description,status,priority,spent,timeSpent";
+const ISSUE_SUMMARY_FIELDS: &str = "key,summary,description,status,priority,type,assignee,tags,followers,spent,timeSpent";
 
 /// Converts dynamic worklog id into normalized string representation.
 fn worklog_id_string(value: &Value) -> Option<String> {
@@ -759,6 +834,40 @@ struct IssueUpdateRequest<'a> {
     summary: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
+}
+
+/// Extended issue update payload supporting priority, type, assignee, tags and followers.
+#[derive(Debug, Serialize)]
+pub struct IssueUpdateExtendedRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<FieldRefInput<'a>>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub issue_type: Option<FieldRefInput<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<ListUpdate<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub followers: Option<ListUpdate<'a>>,
+}
+
+/// Key-based reference for setting fields like priority or type.
+#[derive(Debug, Serialize)]
+pub struct FieldRefInput<'a> {
+    pub key: &'a str,
+}
+
+/// Add/remove delta structure for list fields like tags and followers.
+#[derive(Debug, Serialize)]
+pub struct ListUpdate<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add: Option<Vec<&'a str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remove: Option<Vec<&'a str>>,
 }
 
 #[derive(Debug, Serialize)]

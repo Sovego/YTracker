@@ -15,7 +15,7 @@ pub use checklist::{
     ChecklistItemCreate, ChecklistItemUpdate,
 };
 pub use comment::{Comment, CommentAuthor};
-pub use issue::{Issue, IssueFieldRef};
+pub use issue::{Issue, IssueCreateRequest, IssueFieldRef};
 pub use simple_entity::SimpleEntityRaw;
 pub use transition::{Transition, TransitionDestination};
 pub use user::UserProfile;
