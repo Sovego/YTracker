@@ -7,3 +7,6 @@
 .DS_Store
 .idea/
 *.swp
+ytracker-tauri/src-tauri/crates/ytracker_api/target/.rustc_info.json
+ytracker-tauri/src-tauri/crates/ytracker_api/target/flycheck0/stderr
+ytracker-tauri/src-tauri/crates/ytracker_api/target/flycheck0/stdout

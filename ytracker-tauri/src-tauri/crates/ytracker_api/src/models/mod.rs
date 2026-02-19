@@ -1,3 +1,5 @@
+//! Tracker API model declarations and re-exports used by the client module.
+
 mod attachment;
 mod checklist;
 mod comment;
@@ -13,7 +15,7 @@ pub use checklist::{
     ChecklistItemCreate, ChecklistItemUpdate,
 };
 pub use comment::{Comment, CommentAuthor};
-pub use issue::{Issue, IssueFieldRef};
+pub use issue::{Issue, IssueCreateRequest, IssueFieldRef};
 pub use simple_entity::SimpleEntityRaw;
 pub use transition::{Transition, TransitionDestination};
 pub use user::UserProfile;

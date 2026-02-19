@@ -1,3 +1,6 @@
+/**
+ * Reusable loading and skeleton states for app bootstrap and settings flows.
+ */
 import { KeyRound, RefreshCw, Settings2 } from "lucide-react";
 
 interface AppBootScreenProps {
@@ -6,6 +9,9 @@ interface AppBootScreenProps {
     caption?: string;
 }
 
+/**
+ * Full-screen app bootstrap loading state.
+ */
 export function AppBootScreen({
     title = "Warming up workspaces…",
     subtitle = "YTracker",
@@ -36,6 +42,9 @@ export function AppBootScreen({
     );
 }
 
+/**
+ * Placeholder rows for issue list loading state.
+ */
 export function IssueListSkeleton({ rows = 6 }: { rows?: number }) {
     return (
         <div className="space-y-3" aria-label="Loading issues">
@@ -49,6 +58,9 @@ export function IssueListSkeleton({ rows = 6 }: { rows?: number }) {
     );
 }
 
+/**
+ * Overlay shown while background issue refresh is in progress.
+ */
 export function RefreshOverlay({ label = "Refreshing issues" }: { label?: string }) {
     return (
         <div className="pointer-events-none absolute inset-0 flex items-start justify-center pt-12">
@@ -60,6 +72,9 @@ export function RefreshOverlay({ label = "Refreshing issues" }: { label?: string
     );
 }
 
+/**
+ * Placeholder shown when no issue is selected in desktop layout.
+ */
 export function IssueDetailPlaceholder() {
     return (
         <div className="h-full flex flex-col items-center justify-center text-slate-500 animate-fadeUp">
@@ -87,6 +102,9 @@ export function IssueDetailPlaceholder() {
     );
 }
 
+/**
+ * Skeleton card used while loading settings data.
+ */
 export function SettingsCardSkeleton({ title = "Loading preferences" }: { title?: string }) {
     return (
         <section className="gtk-card p-6 space-y-4 animate-fadeUp">

@@ -1,3 +1,6 @@
+/**
+ * Checklist UI for viewing and editing issue checklist items.
+ */
 import {
     ChecklistItem,
     ChecklistItemCreatePayload,
@@ -57,6 +60,9 @@ function toDateInputValue(dateStr?: string | null): string {
     }
 }
 
+/**
+ * Renders checklist items with inline create/update/delete interactions.
+ */
 export function Checklist({
     issueKey,
     items,

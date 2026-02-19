@@ -1,3 +1,5 @@
+//! Build script for Tauri native target.
+
 use std::env;
 
 fn main() {

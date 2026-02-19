@@ -1,3 +1,5 @@
+//! Checklist models and request payloads for Tracker checklist endpoints.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

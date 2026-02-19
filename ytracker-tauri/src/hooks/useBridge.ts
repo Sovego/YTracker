@@ -1,3 +1,9 @@
+/**
+ * Typed frontend bridge to Tauri native commands/events.
+ *
+ * Centralizes DTO contracts, command wrappers, cache/de-duplication behavior,
+ * and feature-oriented React hooks consumed by UI components.
+ */
 import { invoke } from "@tauri-apps/api/core";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -5,12 +11,19 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getErrorSummary } from "../utils";
 
+/**
+ * Lightweight issue row used by list and summary views.
+ */
 export interface Issue {
     key: string;
     summary: string;
     description: string;
     status: { key: string; display: string };
     priority: { key: string; display: string };
+    issue_type?: SimpleEntity | null;
+    assignee?: SimpleEntity | null;
+    tags?: string[];
+    followers?: SimpleEntity[];
     tracked_seconds?: number | null;
 }
 
@@ -21,6 +34,9 @@ type IssuePageResponse = {
     has_more: boolean;
 };
 
+/**
+ * Normalized issue page returned by paginated/scroll issue search.
+ */
 export interface IssuePage {
     issues: Issue[];
     nextScrollId: string | null;
@@ -28,13 +44,22 @@ export interface IssuePage {
     hasMore: boolean;
 }
 
+/**
+ * Dynamic filter payload forwarded to backend issue search command.
+ */
 export type TrackerFilterPayload = Record<string, unknown>;
 
+/**
+ * Optional issue search criteria used by issue list queries.
+ */
 export interface IssueSearchOptions {
     query?: string | null;
     filter?: TrackerFilterPayload | null;
 }
 
+/**
+ * Current timer snapshot emitted by native timer state.
+ */
 export interface TimerState {
     active: boolean;
     issue_key: string | null;
@@ -43,6 +68,9 @@ export interface TimerState {
     elapsed: number;
 }
 
+/**
+ * Persisted desktop configuration synchronized with native config manager.
+ */
 export interface Config {
     timer_notification_interval: number;
     workday_hours: number;
@@ -50,11 +78,17 @@ export interface Config {
     workday_end_time: string;
 }
 
+/**
+ * Public client credentials status used by login/settings forms.
+ */
 export interface ClientCredentialsInfo {
     client_id?: string | null;
     has_client_secret: boolean;
 }
 
+/**
+ * Simplified issue comment model used in issue details view.
+ */
 export interface Comment {
     id: string;
     text: string;
@@ -62,6 +96,9 @@ export interface Comment {
     created_at: string;
 }
 
+/**
+ * Simplified issue attachment metadata for list/download interactions.
+ */
 export interface Attachment {
     id: string;
     name: string;
@@ -69,6 +106,9 @@ export interface Attachment {
     mime_type?: string;
 }
 
+/**
+ * Worklog entry DTO rendered in issue details and history UI.
+ */
 export interface WorklogEntry {
     id: string;
     date: string;
@@ -77,6 +117,9 @@ export interface WorklogEntry {
     author: string;
 }
 
+/**
+ * Checklist item representation exposed to the UI layer.
+ */
 export interface ChecklistItem {
     id: string;
     text: string;
@@ -88,6 +131,9 @@ export interface ChecklistItem {
     item_type?: string | null;
 }
 
+/**
+ * Payload used when creating a new checklist item.
+ */
 export interface ChecklistItemCreatePayload {
     text: string;
     checked?: boolean;
@@ -96,6 +142,9 @@ export interface ChecklistItemCreatePayload {
     deadline_type?: string | null;
 }
 
+/**
+ * Partial payload used for checklist item edits.
+ */
 export interface ChecklistItemUpdatePayload {
     text?: string;
     checked?: boolean;
@@ -104,17 +153,26 @@ export interface ChecklistItemUpdatePayload {
     deadline_type?: string | null;
 }
 
+/**
+ * Issue transition option returned by Tracker workflow endpoints.
+ */
 export interface Transition {
     id: string;
     name: string;
     to_status: { key: string; display: string } | null;
 }
 
+/**
+ * Binary attachment preview payload with base64-encoded bytes.
+ */
 export interface AttachmentPreview {
     mime_type: string;
     data_base64: string;
 }
 
+/**
+ * Current user profile surfaced in settings/account UI.
+ */
 export interface UserProfile {
     display?: string | null;
     login?: string | null;
@@ -122,11 +180,17 @@ export interface UserProfile {
     avatar_url?: string | null;
 }
 
+/**
+ * Common key/display pair for catalog entities (queues, statuses, etc.).
+ */
 export interface SimpleEntity {
     key: string;
     display: string;
 }
 
+/**
+ * Updater available-event payload (mirrors `updater://available`).
+ */
 export interface UpdateAvailableEvent {
     version: string;
     notes?: string | null;
@@ -134,6 +198,9 @@ export interface UpdateAvailableEvent {
     automatic: boolean;
 }
 
+/**
+ * Incremental updater download progress state.
+ */
 export interface UpdateProgressState {
     downloaded: number;
     total?: number | null;
@@ -150,8 +217,10 @@ let profilePromise: Promise<UserProfile> | null = null;
 
 let cachedConfig: Config | null = null;
 let configPromise: Promise<Config> | null = null;
+// Browser event used to fan out config mutations to all active hook consumers.
 const CONFIG_UPDATED_EVENT = "ytracker:config-updated";
 
+/** Normalizes config payload shape from backend before storing in cache/state. */
 const normalizeConfig = (data: Config): Config => ({
     timer_notification_interval: data.timer_notification_interval,
     workday_hours: data.workday_hours,
@@ -159,6 +228,7 @@ const normalizeConfig = (data: Config): Config => ({
     workday_end_time: data.workday_end_time,
 });
 
+/** Loads config with in-flight promise coalescing and optional cache bypass. */
 const fetchConfigCached = async (force = false): Promise<Config> => {
     if (!force && cachedConfig) {
         return cachedConfig;
@@ -181,6 +251,7 @@ const fetchConfigCached = async (force = false): Promise<Config> => {
     return promise;
 };
 
+/** Loads current user profile with in-flight promise coalescing and cache support. */
 const fetchProfileCached = async (force = false): Promise<UserProfile> => {
     if (!force && cachedProfile) {
         return cachedProfile;
@@ -219,6 +290,10 @@ const DEFAULT_FILTER_KEY = "__nofilter__";
 const SCROLL_ROOT_KEY = "__scroll_root__";
 const issueFetchPromises = new Map<string, Promise<IssuePage>>();
 
+/**
+ * Stable serializer used to derive deterministic cache/de-duplication keys
+ * from nested filter payloads.
+ */
 const stableSerialize = (value: unknown): string => {
     if (value === null || value === undefined) {
         return "null";
@@ -237,6 +312,7 @@ const stableSerialize = (value: unknown): string => {
     return JSON.stringify(value);
 };
 
+/** Removes nullable/undefined filter entries before sending to backend. */
 const normalizeFilterPayload = (filter?: TrackerFilterPayload | null) => {
     if (!filter) return undefined;
     const normalizedEntries = Object.entries(filter).filter(([, value]) => value !== undefined && value !== null);
@@ -249,6 +325,7 @@ const normalizeFilterPayload = (filter?: TrackerFilterPayload | null) => {
     }, {});
 };
 
+/** Canonicalizes issue search options and drops empty query/filter combinations. */
 const normalizeIssueOptions = (options?: IssueSearchOptions | null): IssueSearchOptions | undefined => {
     if (!options) return undefined;
     const query = options.query?.trim();
@@ -262,6 +339,7 @@ const normalizeIssueOptions = (options?: IssueSearchOptions | null): IssueSearch
     };
 };
 
+/** Builds a unique key for request de-duplication across query/filter/scroll state. */
 const getIssueFetchKey = (options?: IssueSearchOptions, scrollId?: string | null) => {
     const queryKey = options?.query || DEFAULT_ISSUE_QUERY_KEY;
     const filterKey = options?.filter ? stableSerialize(options.filter) : DEFAULT_FILTER_KEY;
@@ -269,6 +347,7 @@ const getIssueFetchKey = (options?: IssueSearchOptions, scrollId?: string | null
     return `${queryKey}::${filterKey}::${normalizedScroll}`;
 };
 
+/** Converts snake_case backend page payload into frontend IssuePage contract. */
 const normalizeIssuePage = (payload: IssuePageResponse): IssuePage => ({
     issues: payload.issues ?? [],
     nextScrollId: payload.next_scroll_id ?? null,
@@ -276,6 +355,7 @@ const normalizeIssuePage = (payload: IssuePageResponse): IssuePage => ({
     hasMore: payload.has_more ?? false,
 });
 
+/** Requests one issue page with promise coalescing for identical in-flight queries. */
 const requestIssuePage = async (options?: IssueSearchOptions, scrollId?: string | null) => {
     const key = getIssueFetchKey(options, scrollId);
     let existing = issueFetchPromises.get(key);
@@ -297,6 +377,7 @@ const requestIssuePage = async (options?: IssueSearchOptions, scrollId?: string 
     return existing;
 };
 
+/** Merges incoming issue pages into current list while preserving stable ordering. */
 const mergeIssueLists = (current: Issue[], incoming: Issue[]): Issue[] => {
     if (incoming.length === 0) {
         return current;
@@ -331,7 +412,12 @@ let cachedProjectsDirectory: SimpleEntity[] | null = null;
 let projectsDirectoryPromise: Promise<SimpleEntity[]> | null = null;
 let cachedUsersDirectory: UserProfile[] | null = null;
 let usersDirectoryPromise: Promise<UserProfile[]> | null = null;
+let cachedPrioritiesDirectory: SimpleEntity[] | null = null;
+let prioritiesDirectoryPromise: Promise<SimpleEntity[]> | null = null;
+let cachedIssueTypesDirectory: SimpleEntity[] | null = null;
+let issueTypesDirectoryPromise: Promise<SimpleEntity[]> | null = null;
 
+/** Loads queue directory values with cache reuse and promise coalescing. */
 const fetchQueuesDirectory = async (force = false): Promise<SimpleEntity[]> => {
     if (!force && cachedQueuesDirectory) return cachedQueuesDirectory;
     if (!force && queuesDirectoryPromise) return queuesDirectoryPromise;
@@ -349,6 +435,7 @@ const fetchQueuesDirectory = async (force = false): Promise<SimpleEntity[]> => {
     return promise;
 };
 
+/** Loads project directory values with cache reuse and promise coalescing. */
 const fetchProjectsDirectory = async (force = false): Promise<SimpleEntity[]> => {
     if (!force && cachedProjectsDirectory) return cachedProjectsDirectory;
     if (!force && projectsDirectoryPromise) return projectsDirectoryPromise;
@@ -366,6 +453,7 @@ const fetchProjectsDirectory = async (force = false): Promise<SimpleEntity[]> =>
     return promise;
 };
 
+/** Loads user directory values with cache reuse and promise coalescing. */
 const fetchUsersDirectory = async (force = false): Promise<UserProfile[]> => {
     if (!force && cachedUsersDirectory) return cachedUsersDirectory;
     if (!force && usersDirectoryPromise) return usersDirectoryPromise;
@@ -383,11 +471,49 @@ const fetchUsersDirectory = async (force = false): Promise<UserProfile[]> => {
     return promise;
 };
 
+/** Loads priority directory values with cache reuse and promise coalescing. */
+const fetchPrioritiesDirectory = async (force = false): Promise<SimpleEntity[]> => {
+    if (!force && cachedPrioritiesDirectory) return cachedPrioritiesDirectory;
+    if (!force && prioritiesDirectoryPromise) return prioritiesDirectoryPromise;
+    const promise = invoke<SimpleEntity[]>("get_priorities")
+        .then((data) => {
+            cachedPrioritiesDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (prioritiesDirectoryPromise === promise) {
+                prioritiesDirectoryPromise = null;
+            }
+        });
+    prioritiesDirectoryPromise = promise;
+    return promise;
+};
+
+/** Loads issue type directory values with cache reuse and promise coalescing. */
+const fetchIssueTypesDirectory = async (force = false): Promise<SimpleEntity[]> => {
+    if (!force && cachedIssueTypesDirectory) return cachedIssueTypesDirectory;
+    if (!force && issueTypesDirectoryPromise) return issueTypesDirectoryPromise;
+    const promise = invoke<SimpleEntity[]>("get_issue_types")
+        .then((data) => {
+            cachedIssueTypesDirectory = data;
+            return data;
+        })
+        .finally(() => {
+            if (issueTypesDirectoryPromise === promise) {
+                issueTypesDirectoryPromise = null;
+            }
+        });
+    issueTypesDirectoryPromise = promise;
+    return promise;
+};
+
+/** Returns whether a cache entry is still valid by TTL. */
 const isFresh = <T>(entry?: CacheEntry<T> | null) => {
     if (!entry) return false;
     return Date.now() - entry.timestamp < CACHE_TTL_MS;
 };
 
+/** Reads fresh cached value for an issue key and drops stale entries. */
 const getFreshCache = <T>(map: Map<string, CacheEntry<T>>, key: string) => {
     const entry = map.get(key);
     if (entry && isFresh(entry)) {
@@ -399,10 +525,12 @@ const getFreshCache = <T>(map: Map<string, CacheEntry<T>>, key: string) => {
     return null;
 };
 
+/** Stores data into per-issue cache with current timestamp. */
 const setCache = <T>(map: Map<string, CacheEntry<T>>, key: string, data: T) => {
     map.set(key, { data, timestamp: Date.now() });
 };
 
+/** Invalidates one or all detail caches for a specific issue key. */
 const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "worklogs" | "checklist" | "all") => {
     if (type === "comments" || type === "all") detailCache.comments.delete(issueKey);
     if (type === "attachments" || type === "all") detailCache.attachments.delete(issueKey);
@@ -411,6 +539,7 @@ const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "t
     if (type === "checklist" || type === "all") detailCache.checklist.delete(issueKey);
 };
 
+/** Generic cache-aware fetch wrapper for issue detail resources. */
 const fetchWithCache = async <T>(
     map: Map<string, CacheEntry<T>>,
     issueKey: string,
@@ -428,6 +557,7 @@ const fetchWithCache = async <T>(
     return data;
 };
 
+/** Returns currently cached detail slices for optimistic UI updates. */
 const getCachedDetails = (issueKey: string) => ({
     comments: getFreshCache(detailCache.comments, issueKey) ?? null,
     attachments: getFreshCache(detailCache.attachments, issueKey) ?? null,
@@ -436,6 +566,9 @@ const getCachedDetails = (issueKey: string) => ({
     checklist: getFreshCache(detailCache.checklist, issueKey) ?? null,
 });
 
+/**
+ * Hook that manages issue-related detail endpoints with TTL cache support.
+ */
 export function useIssueDetails() {
     const getIssue = async (issueKey: string) => {
         return invoke<Issue>("get_issue", { issueKey });
@@ -574,6 +707,71 @@ export function useIssueDetails() {
         invalidateCache(issueKey, "checklist");
     };
 
+    /** Uploads a file to an existing issue and returns attachment metadata. */
+    const uploadAttachment = async (issueKey: string, filePath: string): Promise<Attachment> => {
+        const result = await invoke<Attachment>("upload_attachment", { issueKey, filePath });
+        invalidateCache(issueKey, "attachments");
+        return result;
+    };
+
+    /** Uploads a temporary file attachment (for use during issue creation). */
+    const uploadTempAttachment = async (filePath: string): Promise<Attachment> => {
+        return invoke<Attachment>("upload_temp_attachment", { filePath });
+    };
+
+    /** Creates a new issue in the specified queue. Returns the created issue. */
+    const createIssue = async (params: {
+        queue: string;
+        summary: string;
+        description?: string | null;
+        issueType?: string | null;
+        priority?: string | null;
+        assignee?: string | null;
+        project?: string | null;
+        attachmentIds?: number[] | null;
+    }): Promise<Issue> => {
+        return invoke<Issue>("create_issue", {
+            queue: params.queue,
+            summary: params.summary,
+            description: params.description ?? null,
+            issueType: params.issueType ?? null,
+            priority: params.priority ?? null,
+            assignee: params.assignee ?? null,
+            project: params.project ?? null,
+            attachmentIds: params.attachmentIds ?? null,
+        });
+    };
+
+    /** Updates issue fields with extended field support. */
+    const updateIssueExtended = async (
+        issueKey: string,
+        params: {
+            summary?: string | null;
+            description?: string | null;
+            priority?: string | null;
+            issueType?: string | null;
+            assignee?: string | null;
+            tagsAdd?: string[] | null;
+            tagsRemove?: string[] | null;
+            followersAdd?: string[] | null;
+            followersRemove?: string[] | null;
+        }
+    ): Promise<void> => {
+        await invoke("update_issue_extended", {
+            issueKey,
+            summary: params.summary ?? null,
+            description: params.description ?? null,
+            priority: params.priority ?? null,
+            issueType: params.issueType ?? null,
+            assignee: params.assignee ?? null,
+            tagsAdd: params.tagsAdd ?? null,
+            tagsRemove: params.tagsRemove ?? null,
+            followersAdd: params.followersAdd ?? null,
+            followersRemove: params.followersRemove ?? null,
+        });
+        invalidateCache(issueKey, "all");
+    };
+
     return {
         getIssue,
         getComments,
@@ -596,9 +794,16 @@ export function useIssueDetails() {
         editChecklistItem,
         deleteChecklist,
         deleteChecklistItem,
+        createIssue,
+        updateIssueExtended,
+        uploadAttachment,
+        uploadTempAttachment,
     };
 }
 
+/**
+ * Primary hook for issue search, pagination, and refresh operations.
+ */
 export function useTracker() {
     const [issues, setIssues] = useState<Issue[]>([]);
     const [loading, setLoading] = useState(false);
@@ -682,12 +887,17 @@ export function useTracker() {
     return { issues, loading, loadingMore, hasMore, error, fetchIssues, loadMore };
 }
 
+/**
+ * Fetches directory catalogs used to build advanced issue filters.
+ */
 export function useFilterCatalogs(enabled = true) {
     const [queues, setQueues] = useState<SimpleEntity[]>(cachedQueuesDirectory ?? []);
     const [projects, setProjects] = useState<SimpleEntity[]>(cachedProjectsDirectory ?? []);
     const [users, setUsers] = useState<UserProfile[]>(cachedUsersDirectory ?? []);
+    const [priorities, setPriorities] = useState<SimpleEntity[]>(cachedPrioritiesDirectory ?? []);
+    const [issueTypes, setIssueTypes] = useState<SimpleEntity[]>(cachedIssueTypesDirectory ?? []);
     const [loading, setLoading] = useState(
-        enabled && (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory)
+        enabled && (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory || !cachedPrioritiesDirectory || !cachedIssueTypesDirectory)
     );
     const [error, setError] = useState<string | null>(null);
 
@@ -695,15 +905,19 @@ export function useFilterCatalogs(enabled = true) {
         setLoading(true);
         setError(null);
         try {
-            const [queueData, projectData, userData] = await Promise.all([
+            const [queueData, projectData, userData, priorityData, issueTypeData] = await Promise.all([
                 fetchQueuesDirectory(force),
                 fetchProjectsDirectory(force),
                 fetchUsersDirectory(force),
+                fetchPrioritiesDirectory(force),
+                fetchIssueTypesDirectory(force),
             ]);
             setQueues(queueData);
             setProjects(projectData);
             setUsers(userData);
-            return { queueData, projectData, userData };
+            setPriorities(priorityData);
+            setIssueTypes(issueTypeData);
+            return { queueData, projectData, userData, priorityData, issueTypeData };
         } catch (err) {
             const message = String(err);
             setError(message);
@@ -720,7 +934,7 @@ export function useFilterCatalogs(enabled = true) {
             return;
         }
 
-        if (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory) {
+        if (!cachedQueuesDirectory || !cachedProjectsDirectory || !cachedUsersDirectory || !cachedPrioritiesDirectory || !cachedIssueTypesDirectory) {
             setError(null);
             void refresh();
         } else {
@@ -729,9 +943,12 @@ export function useFilterCatalogs(enabled = true) {
         }
     }, [enabled, refresh]);
 
-    return { queues, projects, users, loading, error, refresh };
+    return { queues, projects, users, priorities, issueTypes, loading, error, refresh };
 }
 
+/**
+ * Subscribes to the native timer event stream and exposes timer commands.
+ */
 export function useTimer() {
     const [state, setState] = useState<TimerState>({
         active: false,
@@ -744,7 +961,7 @@ export function useTimer() {
         // Initial state
         invoke<TimerState>("get_timer_state").then(setState);
 
-        // Listen for ticks
+        // Native event contract: `timer-tick` emitted by backend timer service.
         const unlisten = listen<TimerState>("timer-tick", (event) => {
             setState(event.payload);
         });
@@ -770,6 +987,9 @@ export function useTimer() {
     return { state, start, stop };
 }
 
+/**
+ * Worklog command wrapper for creating issue worklog entries.
+ */
 export function useWorkLog() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -791,6 +1011,9 @@ export function useWorkLog() {
     return { logWork, loading, error };
 }
 
+/**
+ * Reads and updates OAuth client credentials stored in the native layer.
+ */
 export function useClientCredentials() {
     const [info, setInfo] = useState<ClientCredentialsInfo | null>(null);
     const [loading, setLoading] = useState(true);
@@ -819,6 +1042,7 @@ export function useClientCredentials() {
     return { info, loading, error, refresh };
 }
 
+/** Checks whether backend currently has an active persisted auth session. */
 export const checkSessionExists = async (): Promise<boolean> => {
     try {
         return await invoke<boolean>("has_session");
@@ -828,6 +1052,9 @@ export const checkSessionExists = async (): Promise<boolean> => {
     }
 };
 
+/**
+ * Reads and persists app configuration via native config commands/events.
+ */
 export function useConfig() {
     const [config, setConfig] = useState<Config | null>(cachedConfig);
 
@@ -885,6 +1112,9 @@ export function useConfig() {
     return { config, save, refresh };
 }
 
+/**
+ * Authentication helpers for OAuth exchange and session lifecycle checks.
+ */
 export function useAuth() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -906,6 +1136,9 @@ export function useAuth() {
     return { exchangeCode, loading, error };
 }
 
+/**
+ * Account-oriented helpers for current user profile and logout.
+ */
 export function useAccount() {
     const [profile, setProfile] = useState<UserProfile | null>(cachedProfile);
     const [loading, setLoading] = useState(!cachedProfile);
@@ -955,6 +1188,9 @@ export function useAccount() {
     return { profile, loading, error, refresh, logout };
 }
 
+/**
+ * Auto-update orchestration hook for checking/downloading/installing updates.
+ */
 export function useUpdater() {
     const [available, setAvailable] = useState<UpdateAvailableEvent | null>(null);
     const [checking, setChecking] = useState(false);
@@ -966,6 +1202,7 @@ export function useUpdater() {
     const [installedVersion, setInstalledVersion] = useState<string | null>(null);
 
     useEffect(() => {
+        // Native updater event contract: `updater://available`.
         const unlistenPromise = listen<UpdateAvailableEvent>("updater://available", (event) => {
             setAvailable(event.payload);
             setInstalledVersion(null);

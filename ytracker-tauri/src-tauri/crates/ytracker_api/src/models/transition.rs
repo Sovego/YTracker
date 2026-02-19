@@ -1,8 +1,11 @@
+//! Workflow transition models for issue state changes.
+
 use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+/// Represents a workflow transition returned by Tracker API, including destination status and metadata.
 pub struct Transition {
     pub id: Option<String>,
     #[serde(default)]
@@ -18,6 +21,7 @@ pub struct Transition {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+/// Represents transition destination status payload with stable key/id and display/name values.
 pub struct TransitionDestination {
     pub id: Option<String>,
     pub key: Option<String>,

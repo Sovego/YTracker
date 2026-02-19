@@ -1,4 +1,5 @@
 /** @type {import('tailwindcss').Config} */
+/** Tailwind theme and content scanning configuration for frontend UI classes. */
 export default {
     content: [
         "./index.html",

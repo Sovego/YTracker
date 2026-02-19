@@ -1,3 +1,9 @@
+/**
+ * Main application shell for YTracker desktop client.
+ *
+ * Coordinates authentication bootstrap, issue list paging, selection state,
+ * timer lifecycle, and modal/dialog surfaces for the UI.
+ */
 import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent } from "react";
 import {
   useTracker,
@@ -15,7 +21,7 @@ import { IssueDetail } from "./components/IssueDetail";
 import { Login } from "./components/Login";
 import { TimerWidget } from "./components/Timer";
 import { WorkLogDialog } from "./components/WorkLogDialog";
-import { Search, RefreshCw, Settings2, ChevronDown } from "lucide-react";
+import { Search, RefreshCw, Settings2, ChevronDown, Plus } from "lucide-react";
 import { useMediaQuery } from "./hooks/useMediaQuery";
 import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -23,9 +29,12 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { AppBootScreen, IssueListSkeleton, RefreshOverlay, IssueDetailPlaceholder } from "./components/Loaders";
 import { FilterSelect, type FilterOption } from "./components/FilterSelect";
+import { CreateIssueDialog } from "./components/CreateIssueDialog";
 import { formatDurationHuman, getErrorSummary } from "./utils";
 
+/** Default resolution filter that hides resolved/closed issues in main list. */
 const BASE_RESOLUTION_FILTER = "empty()";
+/** Shortcut token resolved by backend to currently authenticated user. */
 const SELF_ASSIGNEE_VALUE = "me()";
 
 type TimerStoppedPayload = {
@@ -33,6 +42,7 @@ type TimerStoppedPayload = {
   elapsed: number;
 };
 
+/** Detects auth/session-related errors that should trigger re-auth UX. */
 const isAuthRelatedError = (message: string) => {
   const normalized = message.toLowerCase();
   return (
@@ -45,6 +55,7 @@ const isAuthRelatedError = (message: string) => {
   );
 };
 
+/** Root UI component orchestrating auth, issue list, details, and timer flows. */
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(true); // Start optimistic
   const [authChecked, setAuthChecked] = useState(false);
@@ -71,6 +82,7 @@ function App() {
   const [workLogData, setWorkLogData] = useState<{ key: string, elapsed: number } | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isCreateIssueOpen, setIsCreateIssueOpen] = useState(false);
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [loggedTodaySeconds, setLoggedTodaySeconds] = useState(0);
   const [loadingTodayProgress, setLoadingTodayProgress] = useState(false);
@@ -235,6 +247,7 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    /** Performs auth-first bootstrap before initial issue fetch. */
     const initialize = async () => {
       try {
         const hasSession = await checkSessionExists();
@@ -282,6 +295,7 @@ function App() {
     setDetailKey(selectedIssue?.key ?? "empty");
   }, [selectedIssue]);
 
+  /** Starts guarded load-more operation and prevents concurrent pagination calls. */
   const triggerLoadMore = useCallback(() => {
     if (loadMoreInFlightRef.current) {
       return;
@@ -292,6 +306,7 @@ function App() {
     });
   }, [loadMore]);
 
+  /** Triggers pagination when list scroll approaches bottom threshold. */
   const maybeTriggerLoadMore = useCallback(() => {
     if (!hasMore || loading || loadingMore) return;
     const container = listContainerRef.current;
@@ -307,6 +322,7 @@ function App() {
     }
   }, [hasMore, loading, loadingMore, triggerLoadMore]);
 
+  /** Scroll handler that only evaluates load-more when user scrolls downward. */
   const handleListScroll = useCallback(() => {
     const container = listContainerRef.current;
     if (!container) {
@@ -324,6 +340,7 @@ function App() {
   useEffect(() => {
     let cancelled = false;
 
+    /** Checks notification permission used by timer reminder workflow. */
     const ensurePermission = async () => {
       try {
         const granted = await isPermissionGranted();
@@ -355,10 +372,12 @@ function App() {
     }
   }, [error]);
 
+  /** Prevents native form submit; filtering is applied explicitly via controls. */
   const handleLocalSearchSubmit = (e: FormEvent) => {
     e.preventDefault();
   };
 
+  /** Applies current filter state to issue query and resets selected issue context. */
   const handleApplyFilters = useCallback(async () => {
     const success = await fetchIssues(searchOptions);
     if (success) {
@@ -368,6 +387,7 @@ function App() {
     }
   }, [fetchIssues, searchOptions]);
 
+  /** Handles post-login rehydration of catalogs and active issue query state. */
   const handleLoginSuccess = () => {
     setIsAuthenticated(true);
     setAuthChecked(true);
@@ -380,10 +400,12 @@ function App() {
     void fetchIssues(searchOptions);
   };
 
+  /** Refreshes issue list using current active search options. */
   const refreshActiveIssues = useCallback(() => {
     void fetchIssues(activeSearchOptions ?? searchOptions);
   }, [fetchIssues, activeSearchOptions, searchOptions]);
 
+  /** Opens worklog modal and optionally stores pending timer restart target. */
   const openWorkLogDialog = useCallback((key: string, elapsed: number, restartTarget?: { key: string; summary: string }) => {
     setWorkLogData({ key, elapsed });
     setPendingRestart(restartTarget ?? null);
@@ -410,6 +432,7 @@ function App() {
     };
   }, [isAuthenticated, openWorkLogDialog]);
 
+  /** Closes worklog modal and resumes pending timer when requested. */
   const dismissWorkLogDialog = () => {
     setWorkLogData(null);
     if (pendingRestart) {
@@ -420,11 +443,13 @@ function App() {
     }
   };
 
+  /** Refreshes active issues after successful worklog submission. */
   const handleWorkLogSuccess = () => {
     refreshActiveIssues();
     dismissWorkLogDialog();
   };
 
+  /** Stops active timer and opens worklog dialog for captured duration. */
   const handleStopTimer = async () => {
     const [elapsed, key] = await invokeStopTimer();
     if (key && elapsed > 0) {
@@ -432,6 +457,7 @@ function App() {
     }
   };
 
+  /** Starts timer for selected issue with conflict-resolution flow when already active. */
   const handleStartTimer = async (issueKey: string, issueSummary: string) => {
     if (pendingRestart) {
       setPendingRestart(null);
@@ -487,6 +513,7 @@ function App() {
     await invokeStartTimer(issueKey, issueSummary);
   };
 
+  /** Resets UI/session state after logout callback from settings/account flow. */
   const handleLogout = () => {
     setIsAuthenticated(false);
     setSelectedIssue(null);
@@ -643,13 +670,22 @@ function App() {
                     {visibleIssues.length} of {issues.length} issues
                   </p>
                 </div>
-                <button
-                  onClick={refreshActiveIssues}
-                  className="p-3 rounded-full bg-white/80 dark:bg-slate-900/70 border border-white/60 dark:border-slate-800/80 text-slate-600 hover:text-blue-600 transition-colors"
-                  title="Refresh"
-                >
-                  <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={refreshActiveIssues}
+                    className="p-3 rounded-full bg-white/80 dark:bg-slate-900/70 border border-white/60 dark:border-slate-800/80 text-slate-600 hover:text-blue-600 transition-colors"
+                    title="Refresh"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                  </button>
+                  <button
+                    onClick={() => setIsCreateIssueOpen(true)}
+                    className="p-3 rounded-full bg-blue-600 hover:bg-blue-700 border border-blue-500 text-white transition-colors"
+                    title="Create issue"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               {catalogsError && (
@@ -771,6 +807,19 @@ function App() {
         <SettingsDialog
           onClose={() => setIsSettingsOpen(false)}
           onLogout={handleLogout}
+        />
+      )}
+
+      {isCreateIssueOpen && (
+        <CreateIssueDialog
+          onClose={() => setIsCreateIssueOpen(false)}
+          onSuccess={(issue) => {
+            setIsCreateIssueOpen(false);
+            setSelectedIssue(issue);
+            setDetailKey(issue.key);
+            // Refresh the issue list to include the newly created issue
+            void refreshActiveIssues();
+          }}
         />
       )}
     </div>

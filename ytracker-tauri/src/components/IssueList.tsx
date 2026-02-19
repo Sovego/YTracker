@@ -1,3 +1,6 @@
+/**
+ * Issue list rendering primitives for the sidebar/list pane.
+ */
 import type { ReactNode } from "react";
 import { Issue } from "../hooks/useBridge";
 import { cn } from "../utils";
@@ -103,6 +106,9 @@ interface IssueListProps {
     onSelect: (issue: Issue) => void;
 }
 
+/**
+ * Renders a selectable list of issues with status and timer metadata.
+ */
 export function IssueList({ issues, selectedKey, onSelect }: IssueListProps) {
     return (
         <div className="space-y-3">

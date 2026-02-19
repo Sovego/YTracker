@@ -1,5 +1,11 @@
+//! Frontend-facing DTOs and conversion helpers for the Tauri bridge.
+//!
+//! This module defines serialized payload shapes exchanged between Rust
+//! commands and TypeScript hooks.
+
 use serde::{Deserialize, Serialize};
 
+/// Represents an issue returned by Tracker API, including key, summary, description, status, priority and tracked time metadata.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Issue {
     pub key: String,
@@ -7,27 +13,35 @@ pub struct Issue {
     pub description: String,
     pub status: Status,
     pub priority: Priority,
+    pub issue_type: Option<SimpleEntity>,
+    pub assignee: Option<SimpleEntity>,
+    pub tags: Vec<String>,
+    pub followers: Vec<SimpleEntity>,
     pub tracked_seconds: Option<u64>,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Status {
     pub key: String,
     pub display: String,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Priority {
     pub key: String,
     pub display: String,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SimpleEntity {
     pub key: String,
     pub display: String,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Comment {
     pub id: String,
@@ -36,6 +50,7 @@ pub struct Comment {
     pub created_at: String,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Attachment {
     pub id: String,
@@ -44,6 +59,7 @@ pub struct Attachment {
     pub mime_type: Option<String>,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Transition {
     pub id: String,
@@ -51,12 +67,14 @@ pub struct Transition {
     pub to_status: Option<Status>,
 }
 
+/// Represents a simple key/display pair for dynamic issue fields like status and priority.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AttachmentPreview {
     pub mime_type: String,
     pub data_base64: String,
 }
 
+/// Represents a user profile returned by Tracker API, including display name, login, email and avatar URL.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UserProfile {
     pub display: Option<String>,
@@ -65,6 +83,7 @@ pub struct UserProfile {
     pub avatar_url: Option<String>,
 }
 
+/// Represents a worklog entry returned by Tracker API, including id, date, duration, comment and author.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct WorklogEntry {
     pub id: String,

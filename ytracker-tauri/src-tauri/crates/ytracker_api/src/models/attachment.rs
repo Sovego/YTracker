@@ -1,6 +1,9 @@
+//! Attachment metadata models returned by Tracker issue endpoints.
+
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Represents attachment metadata returned by Tracker API, including stable id, name, content URL, thumbnail URL, mimetype and size.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentMetadata {

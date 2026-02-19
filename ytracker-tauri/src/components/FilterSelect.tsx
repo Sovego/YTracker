@@ -1,6 +1,12 @@
+/**
+ * Searchable multi-select filter input used for Tracker filter dimensions.
+ */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, ChevronDown, Search as SearchIcon, X } from "lucide-react";
 
+/**
+ * Select option shape consumed by `FilterSelect`.
+ */
 export interface FilterOption {
     id: string;
     label: string;
@@ -18,6 +24,9 @@ interface FilterSelectProps {
     loading?: boolean;
 }
 
+/**
+ * Controlled searchable multi-select dropdown with optional clear action.
+ */
 export function FilterSelect({
     label,
     placeholder = "Search...",

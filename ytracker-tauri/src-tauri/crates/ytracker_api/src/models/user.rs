@@ -1,7 +1,10 @@
+//! User profile models returned by Tracker identity endpoints.
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+/// Represents user profile information returned by Tracker API, including display/login/email and avatar metadata.
 pub struct UserProfile {
     pub display: Option<String>,
     pub login: Option<String>,
@@ -12,6 +15,7 @@ pub struct UserProfile {
 }
 
 impl UserProfile {
+    /// Returns best available avatar identifier/url from profile payload.
     pub fn avatar(&self) -> Option<String> {
         self.avatar_url
             .clone()

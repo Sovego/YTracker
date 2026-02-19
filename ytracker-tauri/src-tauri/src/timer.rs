@@ -1,6 +1,9 @@
+//! Timer state machine used for local issue time tracking.
+
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 
+/// Represents the current state of the timer, including whether it's active, which issue is being tracked, when it started and how much time has elapsed.
 #[derive(Clone, Serialize, Debug)]
 pub struct TimerState {
     pub active: bool,
@@ -10,12 +13,14 @@ pub struct TimerState {
     pub elapsed: u64,
 }
 
+/// Thread-safe timer runtime storing active issue and elapsed tracking data.
 pub struct Timer {
     state: Arc<Mutex<TimerState>>,
     last_notification_at: Arc<Mutex<Option<u64>>>,
 }
 
 impl Timer {
+    /// Creates a new idle timer instance.
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(TimerState {
@@ -29,6 +34,7 @@ impl Timer {
         }
     }
 
+    /// Returns current unix timestamp in seconds.
     fn now_secs() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -36,6 +42,7 @@ impl Timer {
             .as_secs()
     }
 
+    /// Starts tracking time for an issue and resets elapsed counter.
     pub fn start(&self, issue_key: String, issue_summary: Option<String>) {
         let now = Self::now_secs();
         {
@@ -50,6 +57,7 @@ impl Timer {
         *last_notification = Some(now);
     }
 
+    /// Stops timer and returns elapsed seconds with previously active issue key.
     pub fn stop(&self) -> (u64, Option<String>) {
         let mut state = self.state.lock().unwrap();
         if !state.active {
@@ -75,6 +83,7 @@ impl Timer {
         (elapsed, key)
     }
 
+    /// Returns a snapshot with elapsed recomputed when timer is active.
     pub fn get_state(&self) -> TimerState {
         let state = self.state.lock().unwrap();
         let mut snapshot = state.clone();
@@ -86,6 +95,7 @@ impl Timer {
         snapshot
     }
 
+    /// Returns timer snapshot only when periodic notification interval is due.
     pub fn check_notification_due(&self, interval_secs: u64) -> Option<TimerState> {
         if interval_secs == 0 {
             return None;
@@ -110,5 +120,78 @@ impl Timer {
 
         *last_notification = Some(now);
         Some(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_sets_active_state_and_issue_fields() {
+        let timer = Timer::new();
+        timer.start("YT-101".to_string(), Some("Implement tests".to_string()));
+
+        let snapshot = timer.get_state();
+        assert!(snapshot.active);
+        assert_eq!(snapshot.issue_key.as_deref(), Some("YT-101"));
+        assert_eq!(snapshot.issue_summary.as_deref(), Some("Implement tests"));
+        assert!(snapshot.start_time.is_some());
+    }
+
+    #[test]
+    fn stop_returns_elapsed_and_resets_timer() {
+        let timer = Timer::new();
+        timer.start("YT-102".to_string(), None);
+
+        {
+            let mut state = timer.state.lock().unwrap();
+            let now = Timer::now_secs();
+            state.start_time = Some(now.saturating_sub(5));
+        }
+
+        let (elapsed, key) = timer.stop();
+        assert!(elapsed >= 5);
+        assert_eq!(key.as_deref(), Some("YT-102"));
+
+        let snapshot = timer.get_state();
+        assert!(!snapshot.active);
+        assert!(snapshot.issue_key.is_none());
+        assert!(snapshot.start_time.is_none());
+        assert_eq!(snapshot.elapsed, 0);
+    }
+
+    #[test]
+    fn stop_when_inactive_returns_zero_and_none() {
+        let timer = Timer::new();
+        let result = timer.stop();
+        assert_eq!(result, (0, None));
+    }
+
+    #[test]
+    fn check_notification_due_respects_interval_and_active_state() {
+        let timer = Timer::new();
+        assert!(timer.check_notification_due(15).is_none());
+
+        timer.start("YT-103".to_string(), None);
+
+        {
+            let mut last = timer.last_notification_at.lock().unwrap();
+            *last = Some(0);
+        }
+
+        let due = timer.check_notification_due(1);
+        assert!(due.is_some());
+        assert_eq!(due.and_then(|state| state.issue_key).as_deref(), Some("YT-103"));
+
+        let immediate_second = timer.check_notification_due(60);
+        assert!(immediate_second.is_none());
+    }
+
+    #[test]
+    fn check_notification_due_returns_none_for_zero_interval() {
+        let timer = Timer::new();
+        timer.start("YT-104".to_string(), None);
+        assert!(timer.check_notification_due(0).is_none());
     }
 }
