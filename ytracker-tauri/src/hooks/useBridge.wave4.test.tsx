@@ -168,4 +168,79 @@ describe("useBridge wave4", () => {
     expect(result.current.upToDate).toBe(true);
     expect(relaunchMock).not.toHaveBeenCalled();
   });
+
+  it("createIssue invokes create_issue command with correct params", async () => {
+    const createdIssue = { key: "Q-1", summary: "New", status: { key: "open", display: "Open" } };
+    invokeMock.mockResolvedValueOnce(createdIssue);
+
+    const { result } = renderHook(() => useIssueDetails());
+
+    const issue = await result.current.createIssue({
+      queue: "Q",
+      summary: "New",
+      description: "desc",
+      issueType: "task",
+      priority: "2",
+      assignee: "alice",
+      project: "proj-1",
+    });
+
+    expect(issue).toEqual(createdIssue);
+    expect(invokeMock).toHaveBeenCalledWith("create_issue", {
+      queue: "Q",
+      summary: "New",
+      description: "desc",
+      issueType: "task",
+      priority: "2",
+      assignee: "alice",
+      project: "proj-1",
+      attachmentIds: null,
+    });
+  });
+
+  it("updateIssueExtended invokes update_issue_extended command", async () => {
+    invokeMock.mockResolvedValueOnce(undefined);
+
+    const { result } = renderHook(() => useIssueDetails());
+
+    await result.current.updateIssueExtended("YT-10", {
+      summary: "Updated",
+      priority: "1",
+      tagsAdd: ["urgent"],
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("update_issue_extended", expect.objectContaining({
+      issueKey: "YT-10",
+      summary: "Updated",
+      priority: "1",
+      tagsAdd: ["urgent"],
+    }));
+  });
+
+  it("uploadAttachment invokes upload_attachment command", async () => {
+    invokeMock.mockResolvedValueOnce({ id: 123, name: "file.txt" });
+
+    const { result } = renderHook(() => useIssueDetails());
+
+    const attachment = await result.current.uploadAttachment("YT-5", "/tmp/file.txt");
+
+    expect(attachment).toEqual({ id: 123, name: "file.txt" });
+    expect(invokeMock).toHaveBeenCalledWith("upload_attachment", {
+      issueKey: "YT-5",
+      filePath: "/tmp/file.txt",
+    });
+  });
+
+  it("uploadTempAttachment invokes upload_temp_attachment command", async () => {
+    invokeMock.mockResolvedValueOnce({ id: 456, name: "temp.png" });
+
+    const { result } = renderHook(() => useIssueDetails());
+
+    const attachment = await result.current.uploadTempAttachment("/tmp/temp.png");
+
+    expect(attachment).toEqual({ id: 456, name: "temp.png" });
+    expect(invokeMock).toHaveBeenCalledWith("upload_temp_attachment", {
+      filePath: "/tmp/temp.png",
+    });
+  });
 });

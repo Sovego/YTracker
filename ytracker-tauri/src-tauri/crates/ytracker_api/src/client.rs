@@ -1050,7 +1050,7 @@ mod tests {
         let _mock = server
             .mock("POST", "/v3/issues/_search")
             .match_query(Matcher::AllOf(vec![
-                Matcher::UrlEncoded("fields".into(), "key,summary,description,status,priority,spent,timeSpent".into()),
+                Matcher::UrlEncoded("fields".into(), "key,summary,description,status,priority,type,assignee,tags,followers,spent,timeSpent".into()),
                 Matcher::UrlEncoded("scrollType".into(), "sorted".into()),
                 Matcher::UrlEncoded("perScroll".into(), "50".into()),
                 Matcher::UrlEncoded("scrollTTLMillis".into(), "1500".into()),

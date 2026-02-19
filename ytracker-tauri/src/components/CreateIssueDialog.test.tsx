@@ -244,4 +244,53 @@ describe("CreateIssueDialog", () => {
       });
     });
   });
+
+  it("selects and clears assignee via searchable dropdown", async () => {
+    renderDialog();
+
+    const assigneeInput = screen.getByPlaceholderText("Select assignee…");
+
+    // Open dropdown and select an assignee
+    fireEvent.focus(assigneeInput);
+    fireEvent.mouseDown(screen.getByText("Alice Smith"));
+
+    // Assignee label should show
+    expect((assigneeInput as HTMLInputElement).value).toBe("Alice Smith");
+
+    // Clear assignee
+    fireEvent.click(screen.getByRole("button", { name: "Clear assignee" }));
+    expect((assigneeInput as HTMLInputElement).value).toBe("");
+  });
+
+  it("selects and clears project via searchable dropdown", async () => {
+    renderDialog();
+
+    const projectInput = screen.getByPlaceholderText("Select project…");
+
+    // Open dropdown and select a project
+    fireEvent.focus(projectInput);
+    fireEvent.mouseDown(screen.getByText("Alpha Project"));
+
+    // Project label should show
+    expect((projectInput as HTMLInputElement).value).toBe("proj-1 — Alpha Project");
+
+    // Clear project
+    fireEvent.click(screen.getByRole("button", { name: "Clear project" }));
+    expect((projectInput as HTMLInputElement).value).toBe("");
+  });
+
+  it("filters assignees by search term", () => {
+    renderDialog();
+
+    const assigneeInput = screen.getByPlaceholderText("Select assignee…");
+    fireEvent.focus(assigneeInput);
+
+    expect(screen.getByText("Alice Smith")).toBeInTheDocument();
+    expect(screen.getByText("Bob Jones")).toBeInTheDocument();
+
+    fireEvent.change(assigneeInput, { target: { value: "bob" } });
+
+    expect(screen.queryByText("Alice Smith")).not.toBeInTheDocument();
+    expect(screen.getByText("Bob Jones")).toBeInTheDocument();
+  });
 });
