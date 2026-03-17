@@ -301,14 +301,15 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate,
     }, [issue?.key]);
 
     const prevRefreshTrigger = useRef(refreshTrigger);
+    const issueKeyForRefresh = issue?.key;
     useEffect(() => {
-        if (refreshTrigger !== undefined && refreshTrigger !== prevRefreshTrigger.current && issue) {
+        if (refreshTrigger !== undefined && refreshTrigger !== prevRefreshTrigger.current && issueKeyForRefresh) {
             prevRefreshTrigger.current = refreshTrigger;
-            loadDetails(issue.key, { forceRefresh: true }).catch((err) => {
+            loadDetails(issueKeyForRefresh, { forceRefresh: true }).catch((err) => {
                 console.error(`Failed to reload issue details (${getErrorSummary(err)})`);
             });
         }
-    }, [refreshTrigger, issue?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [refreshTrigger, issueKeyForRefresh]);
 
     useEffect(() => {
         if (!isStatusMenuOpen) return;
@@ -370,7 +371,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate,
                 followersRemove: followersRemove.length > 0 ? followersRemove : null,
             });
             setIsEditing(false);
-            loadDetails(activeIssue.key, { forceRefresh: true });
+            await loadDetails(activeIssue.key, { forceRefresh: true });
             onIssueUpdate(); // Refresh parent
         } catch (e) {
             console.error(`Failed to update issue (${getErrorSummary(e)})`);
@@ -467,7 +468,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate,
                 setIssueDetails((prev) => prev ? { ...prev, status: toStatus } : prev);
             }
             setTransitionDialog(prev => ({ ...prev, isOpen: false }));
-            loadDetails(activeIssue.key, { forceRefresh: true });
+            await loadDetails(activeIssue.key, { forceRefresh: true });
             onIssueUpdate();
         } catch (e) {
             console.error(`Failed to transition (${getErrorSummary(e)})`);
