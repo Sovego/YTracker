@@ -278,6 +278,7 @@ const CACHE_TTL_MS = 300 * 1000; // 5 minute cache
 type CacheEntry<T> = { data: T; timestamp: number };
 
 const detailCache = {
+    issue: new Map<string, CacheEntry<Issue>>(),
     comments: new Map<string, CacheEntry<Comment[]>>(),
     attachments: new Map<string, CacheEntry<Attachment[]>>(),
     transitions: new Map<string, CacheEntry<Transition[]>>(),
@@ -531,7 +532,8 @@ const setCache = <T>(map: Map<string, CacheEntry<T>>, key: string, data: T) => {
 };
 
 /** Invalidates one or all detail caches for a specific issue key. */
-const invalidateCache = (issueKey: string, type: "comments" | "attachments" | "transitions" | "worklogs" | "checklist" | "all") => {
+const invalidateCache = (issueKey: string, type: "issue" | "comments" | "attachments" | "transitions" | "worklogs" | "checklist" | "all") => {
+    if (type === "issue" || type === "all") detailCache.issue.delete(issueKey);
     if (type === "comments" || type === "all") detailCache.comments.delete(issueKey);
     if (type === "attachments" || type === "all") detailCache.attachments.delete(issueKey);
     if (type === "transitions" || type === "all") detailCache.transitions.delete(issueKey);
@@ -559,6 +561,7 @@ const fetchWithCache = async <T>(
 
 /** Returns currently cached detail slices for optimistic UI updates. */
 const getCachedDetails = (issueKey: string) => ({
+    issue: getFreshCache(detailCache.issue, issueKey) ?? null,
     comments: getFreshCache(detailCache.comments, issueKey) ?? null,
     attachments: getFreshCache(detailCache.attachments, issueKey) ?? null,
     transitions: getFreshCache(detailCache.transitions, issueKey) ?? null,
@@ -570,8 +573,13 @@ const getCachedDetails = (issueKey: string) => ({
  * Hook that manages issue-related detail endpoints with TTL cache support.
  */
 export function useIssueDetails() {
-    const getIssue = async (issueKey: string) => {
-        return invoke<Issue>("get_issue", { issueKey });
+    const getIssue = async (issueKey: string, options?: { forceRefresh?: boolean }) => {
+        return fetchWithCache(
+            detailCache.issue,
+            issueKey,
+            () => invoke<Issue>("get_issue", { issueKey }),
+            options?.forceRefresh
+        );
     };
 
     const getComments = async (issueKey: string, options?: { forceRefresh?: boolean }) => {
@@ -635,6 +643,7 @@ export function useIssueDetails() {
     const executeTransition = async (issueKey: string, transitionId: string, comment?: string, resolution?: string) => {
         const result = await invoke("execute_transition", { issueKey, transitionId, comment, resolution });
         invalidateCache(issueKey, "transitions");
+        invalidateCache(issueKey, "issue");
         return result;
     };
 
@@ -999,6 +1008,8 @@ export function useWorkLog() {
         setError(null);
         try {
             await invoke("log_work", { issueKey, duration, comment });
+            invalidateCache(issueKey, "worklogs");
+            invalidateCache(issueKey, "issue");
             return true;
         } catch (err) {
             setError(String(err));

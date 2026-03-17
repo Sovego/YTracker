@@ -88,6 +88,7 @@ function App() {
   const [loadingTodayProgress, setLoadingTodayProgress] = useState(false);
   const [pendingRestart, setPendingRestart] = useState<{ key: string; summary: string } | null>(null);
   const [detailKey, setDetailKey] = useState<string>("empty");
+  const [detailRefreshTrigger, setDetailRefreshTrigger] = useState(0);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const loadMoreInFlightRef = useRef(false);
   const lastScrollTopRef = useRef(0);
@@ -295,6 +296,15 @@ function App() {
     setDetailKey(selectedIssue?.key ?? "empty");
   }, [selectedIssue]);
 
+  // Sync selectedIssue with refreshed issues array to prevent stale prop data
+  useEffect(() => {
+    if (!selectedIssue) return;
+    const updated = issues.find((i) => i.key === selectedIssue.key);
+    if (updated && updated !== selectedIssue) {
+      setSelectedIssue(updated);
+    }
+  }, [issues, selectedIssue]);
+
   /** Starts guarded load-more operation and prevents concurrent pagination calls. */
   const triggerLoadMore = useCallback(() => {
     if (loadMoreInFlightRef.current) {
@@ -443,10 +453,11 @@ function App() {
     }
   };
 
-  /** Refreshes active issues after successful worklog submission. */
+  /** Refreshes active issues and detail pane after successful worklog submission. */
   const handleWorkLogSuccess = () => {
     refreshActiveIssues();
     dismissWorkLogDialog();
+    setDetailRefreshTrigger((prev) => prev + 1);
   };
 
   /** Stops active timer and opens worklog dialog for captured duration. */
@@ -775,6 +786,7 @@ function App() {
                     onStart={handleStartTimer}
                     onStop={handleStopTimer}
                     onIssueUpdate={refreshActiveIssues}
+                    refreshTrigger={detailRefreshTrigger}
                   />
                 ) : (
                   <div className="h-full flex flex-col items-center justify-center text-slate-400">
