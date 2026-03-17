@@ -125,12 +125,13 @@ interface IssueDetailProps {
     onStart: (key: string, summary: string) => Promise<void> | void;
     onStop: () => Promise<void> | void;
     onIssueUpdate: () => void;
+    refreshTrigger?: number;
 }
 
 /**
  * Renders issue details and issue-level actions for the selected item.
  */
-export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate }: IssueDetailProps) {
+export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate, refreshTrigger }: IssueDetailProps) {
     const { getIssue, getComments, addComment, updateIssueExtended, uploadAttachment, getAttachments, downloadAttachment, previewAttachment, previewInlineImage, getTransitions, getIssueWorklogs, executeTransition, getResolutions, getChecklist, addChecklistItem, editChecklistItem, deleteChecklist, deleteChecklistItem } = useIssueDetails();
     const { priorities, issueTypes, users } = useFilterCatalogs();
 
@@ -214,18 +215,19 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
     };
 
     /** Loads issue detail-related resources in parallel and updates local view state. */
-    const loadDetails = async (key: string) => {
+    const loadDetails = async (key: string, options?: { forceRefresh?: boolean }) => {
         setLoadingDetails(true);
+        const forceRefresh = options?.forceRefresh;
         try {
             const [detail, c, a, t, cl] = await Promise.all([
-                getIssue(key).catch((err) => {
+                getIssue(key, { forceRefresh }).catch((err) => {
                     console.error(`Failed to fetch issue detail (${getErrorSummary(err)})`);
                     return null;
                 }),
-                getComments(key),
-                getAttachments(key),
-                getTransitions(key),
-                getChecklist(key).catch((err) => {
+                getComments(key, { forceRefresh }),
+                getAttachments(key, { forceRefresh }),
+                getTransitions(key, { forceRefresh }),
+                getChecklist(key, { forceRefresh }).catch((err) => {
                     console.error(`Failed to fetch checklist (${getErrorSummary(err)})`);
                     return [] as ChecklistItem[];
                 }),
@@ -298,6 +300,17 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         inlineImageRequests.current.clear();
     }, [issue?.key]);
 
+    const prevRefreshTrigger = useRef(refreshTrigger);
+    const issueKeyForRefresh = issue?.key;
+    useEffect(() => {
+        if (refreshTrigger !== undefined && refreshTrigger !== prevRefreshTrigger.current && issueKeyForRefresh) {
+            prevRefreshTrigger.current = refreshTrigger;
+            loadDetails(issueKeyForRefresh, { forceRefresh: true }).catch((err) => {
+                console.error(`Failed to reload issue details (${getErrorSummary(err)})`);
+            });
+        }
+    }, [refreshTrigger, issueKeyForRefresh]);
+
     useEffect(() => {
         if (!isStatusMenuOpen) return;
 
@@ -358,6 +371,7 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
                 followersRemove: followersRemove.length > 0 ? followersRemove : null,
             });
             setIsEditing(false);
+            await loadDetails(activeIssue.key, { forceRefresh: true });
             onIssueUpdate(); // Refresh parent
         } catch (e) {
             console.error(`Failed to update issue (${getErrorSummary(e)})`);
@@ -442,15 +456,20 @@ export function IssueDetail({ issue, timerState, onStart, onStop, onIssueUpdate 
         if (!activeIssue || !transitionDialog.transition) return;
 
         try {
+            const toStatus = transitionDialog.transition.to_status;
             await executeTransition(
                 activeIssue.key,
                 transitionDialog.transition.id,
                 transitionDialog.comment || undefined,
                 transitionDialog.resolution || undefined
             );
-            onIssueUpdate();
-            loadDetails(activeIssue.key);
+            // Optimistic status update in detail pane
+            if (toStatus) {
+                setIssueDetails((prev) => prev ? { ...prev, status: toStatus } : prev);
+            }
             setTransitionDialog(prev => ({ ...prev, isOpen: false }));
+            await loadDetails(activeIssue.key, { forceRefresh: true });
+            onIssueUpdate();
         } catch (e) {
             console.error(`Failed to transition (${getErrorSummary(e)})`);
             alert("Failed to transition");
