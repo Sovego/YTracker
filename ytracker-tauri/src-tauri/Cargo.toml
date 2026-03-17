@@ -1,7 +1,7 @@
 # Native Tauri application crate manifest.
 [package]
 name = "ytracker-tauri"
-version = "0.3.0"
+version = "0.3.1"
 description = "Yandex Tracker desktop client"
 authors = ["sovego"]
 edition = "2021"
