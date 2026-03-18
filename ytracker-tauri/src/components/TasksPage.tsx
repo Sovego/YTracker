@@ -80,9 +80,10 @@ export function TasksPage() {
 
     // --- Auth error detection ---
     useEffect(() => {
-        if (!error) return;
-        if (isAuthRelatedError(error)) onAuthError();
-    }, [error, onAuthError]);
+        const authError = error || catalogsError;
+        if (!authError) return;
+        if (isAuthRelatedError(authError)) onAuthError();
+    }, [error, catalogsError, onAuthError]);
 
     // --- Report issue keys to AppShell for today progress ---
     useEffect(() => {

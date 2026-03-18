@@ -46,6 +46,11 @@ This document tracks the typed contract between `src/hooks/useBridge.ts` and `sr
   - Emitted by native timer runtime.
   - Consumed by `useTimer` to update elapsed/active state.
 
+- `timer-stopped`
+  - Payload: `{ issue_key: string, elapsed: number }`
+  - Emitted by native timer runtime when timer is stopped externally (tray, notification).
+  - Consumed by `AppShell` to open WorkLogDialog.
+
 - `updater://available`
   - Emitted by updater flow in native backend.
   - Consumed by `useUpdater` to surface available release metadata.
