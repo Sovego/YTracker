@@ -222,7 +222,7 @@ export function TasksPage() {
 
     // --- JSX ---
     return (
-        <div className="glass-panel app-shell flex w-full flex-1 overflow-visible lg:overflow-hidden">
+        <div className="glass-panel app-shell flex w-full flex-1 min-h-0 overflow-hidden">
             <div className="flex flex-1 flex-col lg:flex-row min-h-0 w-full">
                 {/* Sidebar */}
                 <aside className={`${isNarrowLayout && selectedIssue ? "hidden lg:flex" : "flex"} w-full lg:w-[360px] border-b lg:border-b-0 lg:border-r border-white/60 dark:border-slate-800/70 bg-gradient-to-b from-white/95 via-white/75 to-white/60 dark:from-slate-900/80 dark:via-slate-900/60 dark:to-slate-900/40 flex-col flex-shrink-0 min-h-[260px]`}>
