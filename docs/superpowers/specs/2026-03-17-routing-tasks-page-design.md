@@ -102,8 +102,10 @@ AppShell provides an Outlet context with this shape (defined as a TypeScript int
 interface AppShellContext {
   timerState: TimerState;       // from useTimer()
   startTimer: (issueKey: string, issueSummary: string) => void;
-  stopTimer: () => void;
+  stopTimer: () => Promise<void>;
   reportIssueKeys: (keys: string[]) => void;  // for today progress computation
+  worklogSuccessCounter: number; // incremented after worklog submit — pages watch to trigger refresh
+  onAuthError: () => void;       // called by pages on auth-related API errors — triggers logout
 }
 ```
 
